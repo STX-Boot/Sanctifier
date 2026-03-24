@@ -4,6 +4,19 @@ use syn::{parse_str, File, Item};
 
 pub struct AuthGapRule;
 
+#[derive(Default)]
+struct FunctionSecuritySummary {
+    has_mutation: bool,
+    has_auth: bool,
+    has_external_call: bool,
+}
+
+impl FunctionSecuritySummary {
+    fn has_sensitive_action(&self) -> bool {
+        self.has_mutation || self.has_external_call
+    }
+}
+
 impl AuthGapRule {
     pub fn new() -> Self {
         Self
@@ -22,7 +35,7 @@ impl Rule for AuthGapRule {
     }
 
     fn description(&self) -> &str {
-        "Detects public functions that perform storage mutations without authentication checks"
+        "Detects public functions that perform privileged storage changes or external contract calls without authentication checks"
     }
 
     fn check(&self, source: &str) -> Vec<RuleViolation> {
@@ -38,22 +51,15 @@ impl Rule for AuthGapRule {
                     if let syn::ImplItem::Fn(f) = impl_item {
                         if let syn::Visibility::Public(_) = f.vis {
                             let fn_name = f.sig.ident.to_string();
-                            let mut has_mutation = false;
-                            let mut has_read = false;
-                            let mut has_auth = false;
-                            check_fn_body(
-                                &f.block,
-                                &mut has_mutation,
-                                &mut has_read,
-                                &mut has_auth,
-                            );
-                            if has_mutation && !has_read && !has_auth {
+                            let mut summary = FunctionSecuritySummary::default();
+                            check_fn_body(&f.block, &mut summary);
+                            if summary.has_sensitive_action() && !summary.has_auth {
                                 gaps.push(RuleViolation::new(
                                     self.name(),
                                     Severity::Warning,
-                                    format!("Function '{}' performs storage mutation without authentication", fn_name),
+                                    format!("Function '{}' performs a privileged operation without authentication", fn_name),
                                     fn_name.clone(),
-                                ).with_suggestion("Add require_auth() or require_auth_for_args() before storage operations".to_string()));
+                                ).with_suggestion("Add require_auth() or require_auth_for_args() before storage operations or external contract calls".to_string()));
                             }
                         }
                     }
@@ -75,16 +81,9 @@ impl Rule for AuthGapRule {
                 for impl_item in &i.items {
                     if let syn::ImplItem::Fn(f) = impl_item {
                         if let syn::Visibility::Public(_) = f.vis {
-                            let mut has_mutation = false;
-                            let mut has_read = false;
-                            let mut has_auth = false;
-                            check_fn_body(
-                                &f.block,
-                                &mut has_mutation,
-                                &mut has_read,
-                                &mut has_auth,
-                            );
-                            if has_mutation && !has_read && !has_auth {
+                            let mut summary = FunctionSecuritySummary::default();
+                            check_fn_body(&f.block, &mut summary);
+                            if summary.has_sensitive_action() && !summary.has_auth {
                                 // Add require_auth() as the first statement in the function
                                 if let Some(first_stmt) = f.block.stmts.first() {
                                     let span = first_stmt.span();
@@ -128,25 +127,20 @@ impl Rule for AuthGapRule {
     }
 }
 
-fn check_fn_body(
-    block: &syn::Block,
-    has_mutation: &mut bool,
-    has_read: &mut bool,
-    has_auth: &mut bool,
-) {
+fn check_fn_body(block: &syn::Block, summary: &mut FunctionSecuritySummary) {
     for stmt in &block.stmts {
         match stmt {
-            syn::Stmt::Expr(expr, _) => check_expr(expr, has_mutation, has_read, has_auth),
+            syn::Stmt::Expr(expr, _) => check_expr(expr, summary),
             syn::Stmt::Local(local) => {
                 if let Some(init) = &local.init {
-                    check_expr(&init.expr, has_mutation, has_read, has_auth);
+                    check_expr(&init.expr, summary);
                 }
             }
             syn::Stmt::Macro(m) => {
                 if m.mac.path.is_ident("require_auth")
                     || m.mac.path.is_ident("require_auth_for_args")
                 {
-                    *has_auth = true;
+                    summary.has_auth = true;
                 }
             }
             _ => {}
@@ -154,19 +148,19 @@ fn check_fn_body(
     }
 }
 
-fn check_expr(expr: &syn::Expr, has_mutation: &mut bool, has_read: &mut bool, has_auth: &mut bool) {
+fn check_expr(expr: &syn::Expr, summary: &mut FunctionSecuritySummary) {
     match expr {
         syn::Expr::Call(c) => {
             if let syn::Expr::Path(p) = &*c.func {
                 if let Some(segment) = p.path.segments.last() {
                     let ident = segment.ident.to_string();
                     if ident == "require_auth" || ident == "require_auth_for_args" {
-                        *has_auth = true;
+                        summary.has_auth = true;
                     }
                 }
             }
             for arg in &c.args {
-                check_expr(arg, has_mutation, has_read, has_auth);
+                check_expr(arg, summary);
             }
         }
         syn::Expr::MethodCall(m) => {
@@ -178,41 +172,85 @@ fn check_expr(expr: &syn::Expr, has_mutation: &mut bool, has_read: &mut bool, ha
                     || receiver_str.contains("temporary")
                     || receiver_str.contains("instance")
                 {
-                    *has_mutation = true;
-                }
-            }
-            if method_name == "get" {
-                let receiver_str = quote::quote!(#m.receiver).to_string();
-                if receiver_str.contains("storage")
-                    || receiver_str.contains("persistent")
-                    || receiver_str.contains("temporary")
-                    || receiver_str.contains("instance")
-                {
-                    *has_read = true;
+                    summary.has_mutation = true;
                 }
             }
             if method_name == "require_auth" || method_name == "require_auth_for_args" {
-                *has_auth = true;
+                summary.has_auth = true;
             }
-            check_expr(&m.receiver, has_mutation, has_read, has_auth);
+            if is_external_contract_method_call(m) {
+                summary.has_external_call = true;
+            }
+            check_expr(&m.receiver, summary);
             for arg in &m.args {
-                check_expr(arg, has_mutation, has_read, has_auth);
+                check_expr(arg, summary);
             }
         }
-        syn::Expr::Block(b) => check_fn_body(&b.block, has_mutation, has_read, has_auth),
+        syn::Expr::Block(b) => check_fn_body(&b.block, summary),
         syn::Expr::If(i) => {
-            check_expr(&i.cond, has_mutation, has_read, has_auth);
-            check_fn_body(&i.then_branch, has_mutation, has_read, has_auth);
+            check_expr(&i.cond, summary);
+            check_fn_body(&i.then_branch, summary);
             if let Some((_, else_expr)) = &i.else_branch {
-                check_expr(else_expr, has_mutation, has_read, has_auth);
+                check_expr(else_expr, summary);
             }
         }
         syn::Expr::Match(m) => {
-            check_expr(&m.expr, has_mutation, has_read, has_auth);
+            check_expr(&m.expr, summary);
             for arm in &m.arms {
-                check_expr(&arm.body, has_mutation, has_read, has_auth);
+                check_expr(&arm.body, summary);
             }
         }
         _ => {}
     }
+}
+
+fn is_external_contract_method_call(method_call: &syn::ExprMethodCall) -> bool {
+    if method_call.method == "invoke_contract" {
+        return true;
+    }
+
+    receiver_looks_like_external_client(&method_call.receiver)
+}
+
+fn receiver_looks_like_external_client(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Call(call) => {
+            if let syn::Expr::Path(path) = &*call.func {
+                return path_looks_like_client_constructor(&path.path);
+            }
+            false
+        }
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| ident_looks_like_client(&segment.ident.to_string()))
+            .unwrap_or(false),
+        syn::Expr::Reference(reference) => receiver_looks_like_external_client(&reference.expr),
+        syn::Expr::Paren(paren) => receiver_looks_like_external_client(&paren.expr),
+        syn::Expr::Group(group) => receiver_looks_like_external_client(&group.expr),
+        _ => false,
+    }
+}
+
+fn path_looks_like_client_constructor(path: &syn::Path) -> bool {
+    let mut saw_client_type = false;
+
+    for segment in &path.segments {
+        let ident = segment.ident.to_string();
+        if ident_looks_like_client(&ident) {
+            saw_client_type = true;
+        }
+
+        if ident == "new" && saw_client_type {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn ident_looks_like_client(ident: &str) -> bool {
+    let lower = ident.to_lowercase();
+    lower.ends_with("client") || lower.ends_with("_client")
 }

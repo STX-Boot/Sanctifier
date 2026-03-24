@@ -11,6 +11,7 @@ pub const EVENT_INCONSISTENCY: &str = "S008";
 pub const UNHANDLED_RESULT: &str = "S009";
 pub const UPGRADE_RISK: &str = "S010";
 pub const SMT_INVARIANT_VIOLATION: &str = "S011";
+pub const SEP41_INTERFACE_DEVIATION: &str = "S012";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FindingCode {
@@ -24,7 +25,7 @@ pub fn all_finding_codes() -> Vec<FindingCode> {
         FindingCode {
             code: AUTH_GAP,
             category: "authentication",
-            description: "Missing authentication guard in a state-mutating function",
+            description: "Missing authentication guard in a privileged state-changing or external-call function",
         },
         FindingCode {
             code: PANIC_USAGE,
@@ -76,6 +77,11 @@ pub fn all_finding_codes() -> Vec<FindingCode> {
             category: "formal_verification",
             description: "Formal verification (Z3) proved a mathematical violation of an invariant",
         },
+        FindingCode {
+            code: SEP41_INTERFACE_DEVIATION,
+            category: "token_interface",
+            description: "SEP-41 token interface compatibility or authorization deviation",
+        },
     ]
 }
 
@@ -101,5 +107,6 @@ mod tests {
         assert!(codes.iter().any(|c| c.code == STORAGE_COLLISION));
         assert!(codes.iter().any(|c| c.code == UNSAFE_PATTERN));
         assert!(codes.iter().any(|c| c.code == CUSTOM_RULE_MATCH));
+        assert!(codes.iter().any(|c| c.code == SEP41_INTERFACE_DEVIATION));
     }
 }
