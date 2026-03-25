@@ -2,6 +2,8 @@
 members = [
     "tooling/sanctifier-cli",
     "tooling/sanctifier-core",
+    "tooling/sanctifier-cli",
+    "tooling/sanctifier-wasm",
     "contracts/vulnerable-contract",
     "contracts/token-with-bugs",
     "contracts/kani-poc",
