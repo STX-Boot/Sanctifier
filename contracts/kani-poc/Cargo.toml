@@ -13,6 +13,7 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 testutils = ["soroban-sdk/testutils"]
 
 
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 

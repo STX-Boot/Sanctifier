@@ -1,165 +1,1053 @@
+use crate::commands::webhook::{
+    send_scan_completed_webhooks, ScanWebhookPayload, ScanWebhookSummary,
+};
+use crate::vulndb::{VulnDatabase, VulnMatch};
+use clap::{Args, ValueEnum};
+use colored::*;
+use rayon::prelude::*;
+use sanctifier_core::finding_codes;
+use sanctifier_core::{Analyzer, SanctifyConfig};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use clap::Args;
-use colored::*;
-use sanctifier_core::{Analyzer, SanctifyConfig};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, warn};
 
-#[derive(Args, Debug)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SeverityLevel {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+impl SeverityLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SeverityLevel::Critical => "critical",
+            SeverityLevel::High => "high",
+            SeverityLevel::Medium => "medium",
+            SeverityLevel::Low => "low",
+        }
+    }
+}
+
+impl std::str::FromStr for SeverityLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "critical" => Ok(SeverityLevel::Critical),
+            "high" => Ok(SeverityLevel::High),
+            "medium" => Ok(SeverityLevel::Medium),
+            "low" => Ok(SeverityLevel::Low),
+            _ => Err(format!("Invalid severity level: {}", s)),
+        }
+    }
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct AnalyzeArgs {
     /// Path to the contract directory or Cargo.toml
     #[arg(default_value = ".")]
     pub path: PathBuf,
+    /// Output format (text, json)
+    #[arg(short, long, default_value = "text")]
+    pub format: String,
+    /// Limit for ledger entry size in bytes
+    #[arg(short, long, default_value = "64000")]
+    pub limit: usize,
+    /// Path to a custom vulnerability database JSON file
+    #[arg(long)]
+    pub vuln_db: Option<PathBuf>,
+    /// Per-file analysis timeout in seconds (0 = no timeout)
+    #[arg(short, long, default_value = "30")]
+    pub timeout: u64,
+    /// Webhook endpoint(s) to notify when scan completes
+    #[arg(long = "webhook-url")]
+    pub webhook_urls: Vec<String>,
+    /// Return non-zero exit code when findings meet or exceed severity threshold
+    #[arg(long)]
+    pub exit_code: bool,
+    /// Minimum severity threshold for --exit-code (critical|high|medium|low)
+    #[arg(long, value_enum, default_value_t = SeverityLevel::High)]
+    pub min_severity: SeverityLevel,
+    /// Disable incremental analysis cache
+    #[arg(short = 'n', long)]
+    pub no_cache: bool,
 }
 
-pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
-    let path = &args.path;
+// ── Per-file result container ────────────────────────────────────────────────
 
-    if !is_soroban_project(path) {
-        eprintln!(
-            "{} Error: {:?} is not a valid Soroban project. (Missing Cargo.toml with 'soroban-sdk' dependency)",
-            "❌".red(),
-            path
-        );
+/// All findings produced by analysing a single `.rs` file.
+#[derive(Default, serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub(crate) struct FileAnalysisResult {
+    pub(crate) file_path: String,
+    pub(crate) collisions: Vec<sanctifier_core::StorageCollisionIssue>,
+    pub(crate) size_warnings: Vec<sanctifier_core::SizeWarning>,
+    pub(crate) unsafe_patterns: Vec<sanctifier_core::UnsafePattern>,
+    pub(crate) auth_gaps: Vec<sanctifier_core::AuthGapIssue>,
+    pub(crate) panic_issues: Vec<sanctifier_core::PanicIssue>,
+    pub(crate) arithmetic_issues: Vec<sanctifier_core::ArithmeticIssue>,
+    pub(crate) custom_matches: Vec<sanctifier_core::CustomRuleMatch>,
+    pub(crate) vuln_matches: Vec<VulnMatch>,
+    pub(crate) event_issues: Vec<sanctifier_core::EventIssue>,
+    pub(crate) unhandled_results: Vec<sanctifier_core::UnhandledResultIssue>,
+    pub(crate) upgrade_reports: Vec<sanctifier_core::UpgradeReport>,
+    pub(crate) smt_issues: Vec<sanctifier_core::smt::SmtInvariantIssue>,
+    pub(crate) truncation_bounds_issues: Vec<sanctifier_core::TruncationBoundsIssue>,
+    pub(crate) sep41_checked_contracts: Vec<String>,
+    pub(crate) sep41_issues: Vec<sanctifier_core::Sep41Issue>,
+    pub(crate) contractimport_issues: Vec<sanctifier_core::ContractImportMismatchIssue>,
+    pub(crate) variable_shadowing_violations: Vec<sanctifier_core::RuleViolation>,
+    pub(crate) timed_out: bool,
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
+    let should_exit_on_findings = args.exit_code;
+    let found_issues = run_analysis(args)?;
+    if found_issues && should_exit_on_findings {
         std::process::exit(1);
     }
+    Ok(())
+}
 
-    println!(
-        "{} Sanctifier: Valid Soroban project found at {:?}",
-        "✨".green(),
-        path
-    );
-    
-    let config = SanctifyConfig::default();
-    let analyzer = Analyzer::new(config);
-    
-    let mut collisions = Vec::new();
+pub fn run_analysis(args: AnalyzeArgs) -> anyhow::Result<bool> {
+    let path_raw = args.path.clone();
 
-    if path.is_dir() {
-        walk_dir(path, &analyzer, &mut collisions)?;
+    #[cfg(not(windows))]
+    let path = {
+        let s = path_raw.to_string_lossy();
+        if s.contains('\\') {
+            PathBuf::from(s.replace('\\', "/"))
+        } else {
+            path_raw
+        }
+    };
+
+    #[cfg(windows)]
+    let path = path_raw;
+
+    let is_json = args.format == "json";
+    let timeout_secs = args.timeout;
+    let start = Instant::now();
+
+    if !is_soroban_project(&path) {
+        if is_json {
+            let err = serde_json::json!({
+                "error": format!("{:?} is not a valid Soroban project", path),
+                "success": false,
+            });
+            println!("{}", serde_json::to_string_pretty(&err)?);
+        } else {
+            error!(
+                target: "sanctifier",
+                path = %path.display(),
+                "Invalid Soroban project: missing Cargo.toml with a soroban-sdk dependency"
+            );
+        }
+        anyhow::bail!("{:?} is not a valid Soroban project", path);
+    }
+
+    info!(target: "sanctifier", path = %path.display(), "Valid Soroban project found");
+    info!(target: "sanctifier", path = %path.display(), "Analyzing contract");
+
+    let mut config = load_config(&path);
+    config.ledger_limit = args.limit;
+    let analyzer = Arc::new(Analyzer::new(config));
+
+    let vuln_db = Arc::new(match &args.vuln_db {
+        Some(db_path) => {
+            info!(target: "sanctifier", path = %db_path.display(), "Loading custom vulnerability database");
+            VulnDatabase::load(db_path)?
+        }
+        None => {
+            let database = VulnDatabase::load_default();
+            info!(target: "sanctifier", version = %database.version, "Loading built-in vulnerability database");
+            database
+        }
+    });
+
+    let rs_files = if path.is_dir() {
+        collect_rs_files(&path, &analyzer.config.ignore_paths)
+    } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+        vec![path.clone()]
     } else {
-        if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            if let Ok(content) = fs::read_to_string(path) {
-                collisions.extend(analyzer.scan_storage_collisions(&content));
+        vec![]
+    };
+
+    let total_files = rs_files.len();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let cached_counter = Arc::new(AtomicUsize::new(0));
+    let timeout_dur = if timeout_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(timeout_secs))
+    };
+
+    let cache = if args.no_cache {
+        None
+    } else {
+        Some(Arc::new(Mutex::new(AnalysisCache::load(&path))))
+    };
+
+    let mut results: Vec<FileAnalysisResult> = rs_files
+        .par_iter()
+        .map(|file_path| {
+            let idx = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let file_name = file_path.display().to_string();
+            if !is_json {
+                eprintln!("[{}/{}] Analyzing {}", idx, total_files, file_name);
             }
+            let content = match fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(_) => return FileAnalysisResult::default(),
+            };
+
+            let hash = sha256_hex(&content);
+            if let Some(ref cache_mutex) = cache {
+                if let Some(cached_res) = cache_mutex.lock().unwrap().lookup(&file_name, &hash) {
+                    cached_counter.fetch_add(1, Ordering::Relaxed);
+                    return cached_res;
+                }
+            }
+
+            debug!(target: "sanctifier", file = %file_name, "Scanning Rust source file");
+            let analyzer = Arc::clone(&analyzer);
+            let vuln_db = Arc::clone(&vuln_db);
+            let file_name_clone = file_name.clone();
+            let result = match run_with_timeout(timeout_dur, move || {
+                analyze_single_file(&analyzer, &vuln_db, &content, &file_name_clone)
+            }) {
+                Some(res) => res,
+                None => {
+                    warn!(target: "sanctifier", file = %file_name, timeout_secs = timeout_secs, "Analysis timed out");
+                    FileAnalysisResult {
+                        file_path: file_name.clone(),
+                        timed_out: true,
+                        ..Default::default()
+                    }
+                }
+            };
+
+            if let Some(ref cache_mutex) = cache {
+                cache_mutex
+                    .lock()
+                    .unwrap()
+                    .store(file_name, hash, result.clone());
+            }
+
+            result
+        })
+        .collect();
+
+    if let Some(cache_mutex) = cache {
+        let final_cache = Arc::try_unwrap(cache_mutex).unwrap().into_inner().unwrap();
+        final_cache.save();
+    }
+
+    results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+    let mut collisions = Vec::new();
+    let mut size_warnings = Vec::new();
+    let mut unsafe_patterns = Vec::new();
+    let mut auth_gaps = Vec::new();
+    let mut panic_issues = Vec::new();
+    let mut arithmetic_issues = Vec::new();
+    let mut custom_matches = Vec::new();
+    let mut vuln_matches: Vec<VulnMatch> = Vec::new();
+    let mut event_issues = Vec::new();
+    let mut unhandled_results = Vec::new();
+    let mut upgrade_reports = Vec::new();
+    let mut smt_issues = Vec::new();
+    let mut truncation_bounds_issues = Vec::new();
+    let mut sep41_checked_contracts = Vec::new();
+    let mut sep41_issues = Vec::new();
+    let mut contractimport_issues = Vec::new();
+    let mut variable_shadowing_violations = Vec::new();
+    let mut timed_out_files: Vec<String> = Vec::new();
+
+    for r in results {
+        collisions.extend(r.collisions);
+        size_warnings.extend(r.size_warnings);
+        unsafe_patterns.extend(r.unsafe_patterns);
+        auth_gaps.extend(r.auth_gaps);
+        panic_issues.extend(r.panic_issues);
+        arithmetic_issues.extend(r.arithmetic_issues);
+        custom_matches.extend(r.custom_matches);
+        vuln_matches.extend(r.vuln_matches);
+        event_issues.extend(r.event_issues);
+        unhandled_results.extend(r.unhandled_results);
+        upgrade_reports.extend(r.upgrade_reports);
+        smt_issues.extend(r.smt_issues);
+        truncation_bounds_issues.extend(r.truncation_bounds_issues);
+        sep41_checked_contracts.extend(r.sep41_checked_contracts);
+        sep41_issues.extend(r.sep41_issues);
+        contractimport_issues.extend(r.contractimport_issues);
+        variable_shadowing_violations.extend(r.variable_shadowing_violations);
+        if r.timed_out {
+            timed_out_files.push(r.file_path);
         }
     }
 
+    let total_findings = collisions.len()
+        + size_warnings.len()
+        + unsafe_patterns.len()
+        + auth_gaps.len()
+        + panic_issues.len()
+        + arithmetic_issues.len()
+        + custom_matches.len()
+        + event_issues.len()
+        + unhandled_results.len()
+        + upgrade_reports
+            .iter()
+            .map(|r| r.findings.len())
+            .sum::<usize>()
+        + smt_issues.len()
+        + truncation_bounds_issues.len()
+        + sep41_issues.len()
+        + contractimport_issues.len()
+        + variable_shadowing_violations.len()
+        + timed_out_files.len();
+
+    let has_critical = auth_gaps
+        .iter()
+        .any(|i| i.severity() == finding_codes::FindingSeverity::Critical)
+        || panic_issues
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::Critical)
+        || !smt_issues.is_empty()
+        || sep41_issues
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::Critical)
+        || size_warnings
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::Critical);
+
+    let has_high = arithmetic_issues
+        .iter()
+        .any(|i| i.severity() == finding_codes::FindingSeverity::High)
+        || panic_issues
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::High)
+        || size_warnings
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::High)
+        || unsafe_patterns
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::High)
+        || upgrade_reports.iter().any(|r| {
+            r.findings
+                .iter()
+                .any(|f| f.severity() == finding_codes::FindingSeverity::High)
+        })
+        || event_issues
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::High)
+        || unhandled_results
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::High)
+        || truncation_bounds_issues
+            .iter()
+            .any(|i| i.severity() == finding_codes::FindingSeverity::High);
+
+    let highest_finding_severity: Option<SeverityLevel> = {
+        let mut highest: Option<SeverityLevel> = None;
+        let mut consider = |candidate: SeverityLevel| {
+            highest = Some(match highest {
+                Some(current) => current.max(candidate),
+                None => candidate,
+            });
+        };
+        if has_critical {
+            consider(SeverityLevel::Critical);
+        }
+        if has_high {
+            consider(SeverityLevel::High);
+        }
+        if !size_warnings.is_empty() || !unsafe_patterns.is_empty() || !sep41_issues.is_empty() {
+            consider(SeverityLevel::Medium);
+        }
+        if !event_issues.is_empty() {
+            consider(SeverityLevel::Low);
+        }
+        for vuln in &vuln_matches {
+            if let Ok(sev) = vuln.severity.parse::<SeverityLevel>() {
+                consider(sev);
+            }
+        }
+        if !timed_out_files.is_empty() {
+            consider(SeverityLevel::Low);
+        }
+        if !contractimport_issues.is_empty() {
+            consider(SeverityLevel::Medium);
+        }
+        highest
+    };
+
+    let should_exit_with_1 = args.exit_code
+        && highest_finding_severity
+            .map(|h| h >= args.min_severity)
+            .unwrap_or(false);
+
+    let timestamp = chrono_timestamp();
+    let _duration_ms = start.elapsed().as_millis() as u64;
+    let duration_ms = _duration_ms;
+
+    let webhook_payload = ScanWebhookPayload {
+        event: "scan.completed",
+        project_path: path.display().to_string(),
+        timestamp_unix: timestamp.clone(),
+        summary: ScanWebhookSummary {
+            total_findings,
+            has_critical,
+            has_high,
+        },
+    };
+    if let Err(err) = send_scan_completed_webhooks(&args.webhook_urls, &webhook_payload) {
+        warn!(target: "sanctifier", error = %err, "Failed to initialize webhook client");
+    }
+
+    if is_json {
+        let report = serde_json::json!({
+            "schema_version": "1.0.0",
+            "storage_collisions": collisions,
+            "ledger_size_warnings": size_warnings,
+            "unsafe_patterns": unsafe_patterns,
+            "auth_gaps": auth_gaps,
+            "panic_issues": panic_issues,
+            "arithmetic_issues": arithmetic_issues,
+            "truncation_bounds_issues": truncation_bounds_issues,
+            "custom_rules": custom_matches,
+            "event_issues": event_issues,
+            "unhandled_results": unhandled_results,
+            "upgrade_reports": upgrade_reports,
+            "smt_issues": smt_issues,
+            "sep41_checked_contracts": sep41_checked_contracts,
+            "sep41_issues": sep41_issues,
+            "contractimport_issues": contractimport_issues,
+            "vulnerability_db_matches": vuln_matches,
+            "vulnerability_db_version": vuln_db.version,
+            "timed_out_files": timed_out_files,
+            "metadata": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "timestamp": timestamp,
+                "duration_ms": duration_ms,
+                "project_path": path.display().to_string(),
+                "format": "sanctifier-ci-v1",
+                "timeout_secs": timeout_secs,
+                "cached_files": cached_counter.load(Ordering::Relaxed),
+                "total_files": total_files,
+            },
+            "error_codes": finding_codes::all_finding_codes(),
+            "summary": {
+                "total_findings": total_findings,
+                "cached_files": cached_counter.load(Ordering::Relaxed),
+                "reanalysed_files": total_files - cached_counter.load(Ordering::Relaxed),
+                "storage_collisions": collisions.len(),
+                "auth_gaps": auth_gaps.len(),
+                "panic_issues": panic_issues.len(),
+                "arithmetic_issues": arithmetic_issues.len(),
+                "truncation_bounds_issues": truncation_bounds_issues.len(),
+                "size_warnings": size_warnings.len(),
+                "unsafe_patterns": unsafe_patterns.len(),
+                "custom_rule_matches": custom_matches.len(),
+                "event_issues": event_issues.len(),
+                "unhandled_results": unhandled_results.len(),
+                "smt_issues": smt_issues.len(),
+                "sep41_issues": sep41_issues.len(),
+                "contractimport_issues": contractimport_issues.len(),
+                "timed_out_files": timed_out_files.len(),
+                "has_critical": has_critical,
+                "has_high": has_high,
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(should_exit_with_1);
+    }
+
+    // ── Text output ──────────────────────────────────────────────────────────
+    if !timed_out_files.is_empty() {
+        println!(
+            "\n{} {} file(s) timed out ({}s limit):",
+            "⏱️".yellow(),
+            timed_out_files.len(),
+            timeout_secs
+        );
+        for f in &timed_out_files {
+            println!(
+                "   {} [{}] {}",
+                "->".red(),
+                finding_codes::ANALYSIS_TIMEOUT.bold(),
+                f
+            );
+        }
+    }
     if collisions.is_empty() {
         println!("\n{} No storage key collisions found.", "✅".green());
     } else {
-        println!("\n{} Found potential Storage Key Collisions!", "⚠️".yellow());
-        for collision in collisions {
-            println!("   {} Value: {}", "->".red(), collision.key_value.bold());
-            println!("      Type: {}", collision.key_type);
-            println!("      Location: {}", collision.location);
-            println!("      Message: {}", collision.message);
+        println!(
+            "\n{} Found potential Storage Key Collisions!",
+            "⚠️".yellow()
+        );
+        for c in &collisions {
+            println!(
+                "   {} [{}] Value: {}",
+                "->".red(),
+                finding_codes::STORAGE_COLLISION.bold(),
+                c.key_value.bold()
+            );
+            println!("      Type: {}", c.key_type);
+            println!("      Location: {}", c.location);
+            println!("      Message: {}", c.message);
         }
     }
-    
-    Ok(())
-}
-
-fn walk_dir(dir: &Path, analyzer: &Analyzer, collisions: &mut Vec<sanctifier_core::StorageCollisionIssue>) -> anyhow::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            walk_dir(&path, analyzer, collisions)?;
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            if let Ok(content) = fs::read_to_string(&path) {
-                let mut issues = analyzer.scan_storage_collisions(&content);
-                // Prefix location with filename
-                let file_name = path.display().to_string();
-                for issue in &mut issues {
-                    issue.location = format!("{}:{}", file_name, issue.location);
-                }
-                collisions.extend(issues);
+    if auth_gaps.is_empty() {
+        println!("{} No authentication gaps found.", "✅".green());
+    } else {
+        println!("\n{} Found potential Authentication Gaps!", "⚠️".yellow());
+        for gap in &auth_gaps {
+            println!(
+                "   {} [{}] Function: {}",
+                "->".red(),
+                finding_codes::AUTH_GAP.bold(),
+                gap.function_name.bold()
+            );
+        }
+    }
+    if panic_issues.is_empty() {
+        println!("{} No explicit Panics/Unwraps found.", "✅".green());
+    } else {
+        println!("\n{} Found explicit Panics/Unwraps!", "⚠️".yellow());
+        for issue in &panic_issues {
+            println!(
+                "   {} [{}] Type: {}",
+                "->".red(),
+                finding_codes::PANIC_USAGE.bold(),
+                issue.issue_type.bold()
+            );
+            println!("      Location: {}", issue.location);
+        }
+    }
+    if arithmetic_issues.is_empty() {
+        println!("{} No unchecked Arithmetic Operations found.", "✅".green());
+    } else {
+        println!("\n{} Found unchecked Arithmetic Operations!", "⚠️".yellow());
+        for issue in &arithmetic_issues {
+            println!(
+                "   {} [{}] Op: {}",
+                "->".red(),
+                finding_codes::ARITHMETIC_OVERFLOW.bold(),
+                issue.operation.bold()
+            );
+            println!("      Location: {}", issue.location);
+        }
+    }
+    if truncation_bounds_issues.is_empty() {
+        println!(
+            "{} No integer truncation or unchecked indexing found.",
+            "✅".green()
+        );
+    } else {
+        println!("\n{} Found Truncation / Bounds Risk issues!", "⚠️".yellow());
+        for issue in &truncation_bounds_issues {
+            println!(
+                "   {} [{}] Kind: {} | Expr: {}",
+                "->".red(),
+                finding_codes::TRUNCATION_BOUNDS.bold(),
+                issue.kind.bold(),
+                issue.expression.bold()
+            );
+            println!("      Location: {}", issue.location);
+            println!("      Suggestion: {}", issue.suggestion);
+        }
+    }
+    if size_warnings.is_empty() {
+        println!("{} No ledger size issues found.", "✅".green());
+    } else {
+        println!("\n{} Found Ledger Size Warnings!", "⚠️".yellow());
+        for w in &size_warnings {
+            println!(
+                "   {} [{}] Struct: {}",
+                "->".red(),
+                finding_codes::LEDGER_SIZE_RISK.bold(),
+                w.struct_name.bold()
+            );
+            println!("      Size: {} bytes", w.estimated_size);
+        }
+    }
+    if !event_issues.is_empty() {
+        println!(
+            "\n{} Found Event Consistency/Optimization issues!",
+            "⚠️".yellow()
+        );
+        for issue in &event_issues {
+            println!(
+                "   {} [{}] Event: {}",
+                "->".red(),
+                finding_codes::EVENT_INCONSISTENCY.bold(),
+                issue.event_name.bold()
+            );
+            println!("      Type: {:?}", issue.issue_type);
+            println!("      Location: {}", issue.location);
+            println!("      Message: {}", issue.message);
+        }
+    }
+    if !unhandled_results.is_empty() {
+        println!("\n{} Found Unhandled Result issues!", "⚠️".yellow());
+        for issue in &unhandled_results {
+            println!(
+                "   {} [{}] Function: {}",
+                "->".red(),
+                finding_codes::UNHANDLED_RESULT.bold(),
+                issue.function_name.bold()
+            );
+            println!("      Call: {}", issue.call_expression);
+            println!("      Location: {}", issue.location);
+            println!("      Message: {}", issue.message);
+        }
+    }
+    if variable_shadowing_violations.is_empty() {
+        println!("{} No variable shadowing detected.", "✅".green());
+    } else {
+        println!("\n{} Found Variable Shadowing issues!", "⚠️".yellow());
+        for violation in &variable_shadowing_violations {
+            println!("   {} [S006] {}", "->".red(), violation.message.bold());
+            println!("      Location: {}", violation.location);
+            if let Some(suggestion) = &violation.suggestion {
+                println!("      Suggestion: {}", suggestion);
             }
         }
     }
-    Ok(())
+    let total_upgrade_findings: usize = upgrade_reports.iter().map(|r| r.findings.len()).sum();
+    if total_upgrade_findings > 0 {
+        println!("\n{} Found Upgrade/Admin Risk issues!", "⚠️".yellow());
+        for report in &upgrade_reports {
+            for finding in &report.findings {
+                println!(
+                    "   {} [{}] Category: {:?}",
+                    "->".red(),
+                    finding_codes::UPGRADE_RISK.bold(),
+                    finding.category
+                );
+                if let Some(f_name) = &finding.function_name {
+                    println!("      Function: {}", f_name);
+                }
+                println!("      Location: {}", finding.location);
+                println!("      Message: {}", finding.message);
+                println!("      Suggestion: {}", finding.suggestion);
+            }
+        }
+    }
+    if !smt_issues.is_empty() {
+        println!("\n{} Found Formal Verification (SMT) issues!", "❌".red());
+        for issue in &smt_issues {
+            println!(
+                "   {} [{}] Function: {}",
+                "->".red(),
+                finding_codes::SMT_INVARIANT_VIOLATION.bold(),
+                issue.function_name.bold()
+            );
+            println!("      Description: {}", issue.description);
+            println!("      Location: {}", issue.location);
+        }
+    }
+    if !sep41_checked_contracts.is_empty() && sep41_issues.is_empty() {
+        println!("{} SEP-41 token interface verified exactly.", "✅".green());
+    } else if !sep41_issues.is_empty() {
+        println!("\n{} Found SEP-41 Interface Deviations!", "⚠️".yellow());
+        for issue in &sep41_issues {
+            println!(
+                "   {} [{}] Function: {}",
+                "->".red(),
+                finding_codes::SEP41_INTERFACE_DEVIATION.bold(),
+                issue.function_name.bold()
+            );
+            println!("      Kind: {:?}", issue.kind);
+            println!("      Location: {}", issue.location);
+            println!("      Message: {}", issue.message);
+            println!("      Expected: {}", issue.expected_signature);
+            if let Some(actual) = &issue.actual_signature {
+                println!("      Actual: {}", actual);
+            }
+        }
+    }
+    if !contractimport_issues.is_empty() {
+        println!("\n{} Found ContractImport Mismatches!", "⚠️".yellow());
+        for issue in &contractimport_issues {
+            println!(
+                "   {} [{}] WASM: {}",
+                "->".red(),
+                finding_codes::CONTRACTIMPORT_MISMATCH.bold(),
+                issue.wasm_path.bold()
+            );
+            println!("      Location: {}", issue.location);
+            println!("      Message: {}", issue.message);
+        }
+    }
+    if vuln_matches.is_empty() {
+        println!(
+            "{} No known vulnerability patterns matched (DB v{}).",
+            "✅".green(),
+            vuln_db.version
+        );
+    } else {
+        println!(
+            "\n{} Found {} known vulnerability pattern(s) (DB v{})!",
+            "🛡️".red(),
+            vuln_matches.len(),
+            vuln_db.version
+        );
+        for m in &vuln_matches {
+            let sev_icon = match m.severity.as_str() {
+                "critical" => "❌".red(),
+                "high" => "🔴".red(),
+                "medium" => "⚠️".yellow(),
+                _ => "ℹ️".blue(),
+            };
+            println!(
+                "   {} [{}] {} ({})",
+                sev_icon,
+                m.vuln_id.bold(),
+                m.name.bold(),
+                m.severity.to_uppercase()
+            );
+            println!("      File: {}:{}", m.file, m.line);
+            println!("      {}", m.description);
+            if !m.recommendation.is_empty() {
+                println!("      Suggestion: {}", m.recommendation);
+            }
+        }
+    }
+
+    let cached_count = cached_counter.load(Ordering::Relaxed);
+    let reanalysed_count = total_files - cached_count;
+    println!(
+        "\n{} Static analysis complete. ({} served from cache, {} re-analysed, {} ms)",
+        "✨".green(),
+        cached_count.to_string().bold(),
+        reanalysed_count.to_string().bold(),
+        duration_ms
+    );
+    Ok(should_exit_with_1)
 }
 
-#[derive(Default, Debug)]
-pub struct FileAnalysisResult {
-    pub file_path: String,
-    pub auth_gaps: Vec<sanctifier_core::AuthGapIssue>,
-    pub panic_issues: Vec<sanctifier_core::PanicIssue>,
-    pub arithmetic_issues: Vec<sanctifier_core::ArithmeticIssue>,
-    pub size_warnings: Vec<sanctifier_core::SizeWarning>,
-    pub unsafe_patterns: Vec<sanctifier_core::UnsafePattern>,
-    pub collisions: Vec<sanctifier_core::StorageCollisionIssue>,
-    pub event_issues: Vec<sanctifier_core::EventIssue>,
-    pub unhandled_results: Vec<sanctifier_core::UnhandledResultIssue>,
-    pub upgrade_reports: Vec<sanctifier_core::UpgradeReport>,
-    pub smt_issues: Vec<sanctifier_core::SmtInvariantIssue>,
-    pub sep41_issues: Vec<sanctifier_core::Sep41Issue>,
-    pub vuln_matches: Vec<crate::vulndb::VulnMatch>,
-    pub timed_out: bool,
+// ── Analyse one file ─────────────────────────────────────────────────────────
+
+pub(crate) fn analyze_single_file(
+    analyzer: &Analyzer,
+    vuln_db: &VulnDatabase,
+    content: &str,
+    file_name: &str,
+) -> FileAnalysisResult {
+    let mut res = FileAnalysisResult {
+        file_path: file_name.to_string(),
+        ..Default::default()
+    };
+
+    let mut c = analyzer.scan_storage_collisions(content);
+    for i in &mut c {
+        i.location = format!("{}:{}", file_name, i.location);
+    }
+    res.collisions = c;
+
+    res.size_warnings = analyzer.analyze_ledger_size(content);
+
+    let mut u = analyzer.analyze_unsafe_patterns(content);
+    for i in &mut u {
+        i.snippet = format!("{}:{}", file_name, i.snippet);
+    }
+    res.unsafe_patterns = u;
+
+    for g in analyzer.scan_auth_gaps(content) {
+        res.auth_gaps.push(sanctifier_core::AuthGapIssue {
+            function_name: format!("{}:{}", file_name, g.function_name),
+        });
+    }
+
+    let mut p = analyzer.scan_panics(content);
+    for i in &mut p {
+        i.location = format!("{}:{}", file_name, i.location);
+    }
+    res.panic_issues = p;
+
+    let mut a = analyzer.scan_arithmetic_overflow(content);
+    for i in &mut a {
+        i.location = format!("{}:{}", file_name, i.location);
+    }
+    res.arithmetic_issues = a;
+
+    let mut tb = analyzer.scan_truncation_bounds(content);
+    for i in &mut tb {
+        i.location = format!("{}:{}", file_name, i.location);
+    }
+    res.truncation_bounds_issues = tb;
+
+    let mut custom = analyzer.analyze_custom_rules(content, &analyzer.config.custom_rules);
+    for m in &mut custom {
+        m.snippet = format!("{}:{}: {}", file_name, m.line, m.snippet);
+    }
+    res.custom_matches = custom;
+
+    res.vuln_matches = vuln_db.scan(content, file_name);
+
+    let mut e = analyzer.scan_events(content);
+    for i in &mut e {
+        i.location = format!("{}:{}", file_name, i.location);
+    }
+    res.event_issues = e;
+
+    let mut r = analyzer.scan_unhandled_results(content);
+    for i in &mut r {
+        i.location = format!("{}:{}", file_name, i.location);
+    }
+    res.unhandled_results = r;
+
+    // Scan for variable shadowing using the rule system
+    let mut vs = analyzer.run_rule(content, "variable_shadowing");
+    for v in &mut vs {
+        v.location = format!("{}:{}", file_name, v.location);
+    }
+    res.variable_shadowing_violations = vs;
+
+    let mut up = analyzer.analyze_upgrade_patterns(content);
+    for f in &mut up.findings {
+        f.location = format!("{}:{}", file_name, f.location);
+    }
+    res.upgrade_reports.push(up);
+
+    let mut smt = analyzer.verify_smt_invariants(content);
+    for i in &mut smt {
+        i.location = format!("{}:{}", file_name, i.location);
+    }
+    res.smt_issues = smt;
+
+    let sep41_report = analyzer.verify_sep41_interface(content);
+    if sep41_report.candidate {
+        res.sep41_checked_contracts.push(file_name.to_string());
+        for mut issue in sep41_report.issues {
+            issue.location = format!("{}:{}", file_name, issue.location);
+            res.sep41_issues.push(issue);
+        }
+    }
+
+    let mut ci = analyzer.scan_contractimports(content);
+    for i in &mut ci {
+        i.location = format!("{}:{}", file_name, i.location);
+
+        // Stale WASM check heuristic:
+        // Attempt to find the full path of the WASM file relative to the file doing the import.
+        let mut base_dir = PathBuf::from(file_name);
+        base_dir.pop();
+        let wasm_file_path = base_dir.join(&i.wasm_path);
+
+        if !wasm_file_path.exists() {
+            i.message = format!(
+                "The imported WASM file does not exist: {}",
+                wasm_file_path.display()
+            );
+        } else {
+            // Find modification time of the WASM
+            if let Ok(wasm_meta) = std::fs::metadata(&wasm_file_path) {
+                if let Ok(wasm_mtime) = wasm_meta.modified() {
+                    let wasm_stem = wasm_file_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let mut found_newer_rs = false;
+                    let mut newest_rs_path = String::new();
+
+                    // Simple heuristic: look for any .rs file in the workspace containing the stem
+                    // If a matching .rs file is newer than the wasm, it's considered stale.
+                    let workspace_root = PathBuf::from(".");
+                    let rs_files = crate::commands::analyze::collect_rs_files(
+                        &workspace_root,
+                        &analyzer.config.ignore_paths,
+                    );
+
+                    for rs_f in rs_files {
+                        let path_str = rs_f.display().to_string();
+                        // Strip hyphens and underscores for loose matching e.g. "my-contract" vs "my_contract"
+                        let normalized_stem = wasm_stem.replace('-', "_");
+                        let normalized_path = path_str.replace('-', "_");
+                        if normalized_path.contains(&normalized_stem) {
+                            if let Ok(rs_meta) = std::fs::metadata(&rs_f) {
+                                if let Ok(rs_mtime) = rs_meta.modified() {
+                                    if rs_mtime > wasm_mtime {
+                                        found_newer_rs = true;
+                                        newest_rs_path = path_str;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if found_newer_rs {
+                        i.message = format!("The imported WASM appears older than its corresponding workspace source file: {}. Rebuild the contract.", newest_rs_path);
+                    } else {
+                        i.message = String::new(); // No issue
+                    }
+                }
+            }
+        }
+    }
+    res.contractimport_issues = ci.into_iter().filter(|i| !i.message.is_empty()).collect();
+
+    res
 }
 
-pub fn load_config(_path: &Path) -> SanctifyConfig {
+// ── Timeout wrapper ──────────────────────────────────────────────────────────
+
+pub(crate) fn run_with_timeout<F, R>(timeout: Option<Duration>, f: F) -> Option<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    match timeout {
+        None => Some(f()),
+        Some(dur) => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(f());
+            });
+            rx.recv_timeout(dur).ok()
+        }
+    }
+}
+
+// ── File collection ──────────────────────────────────────────────────────────
+
+pub(crate) fn collect_rs_files(dir: &Path, ignore_paths: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_rs_files_inner(dir, ignore_paths, &mut out);
+    out
+}
+
+fn collect_rs_files_inner(dir: &Path, ignore_paths: &[String], out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if !ignore_paths.iter().any(|p| path.ends_with(p)) {
+                collect_rs_files_inner(&path, ignore_paths, out);
+            }
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn chrono_timestamp() -> String {
+    let now = std::time::SystemTime::now();
+    let secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{}", secs)
+}
+
+pub(crate) fn load_config(path: &Path) -> SanctifyConfig {
+    let mut current = if path.is_file() {
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        path.to_path_buf()
+    };
+    loop {
+        let config_path = current.join(".sanctify.toml");
+        if config_path.exists() {
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                if let Ok(config) = toml::from_str(&content) {
+                    return config;
+                }
+            }
+        }
+        if !current.pop() {
+            break;
+        }
+    }
     SanctifyConfig::default()
 }
 
-pub fn collect_rs_files(dir: &Path, _ignore_paths: &[String]) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                files.extend(collect_rs_files(&path, _ignore_paths));
-            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-                files.push(path);
-            }
-        }
+pub(crate) fn is_soroban_project(path: &Path) -> bool {
+    if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+        return true;
     }
-    files
+    let cargo_toml_path = if path.is_dir() {
+        path.join("Cargo.toml")
+    } else {
+        path.to_path_buf()
+    };
+    cargo_toml_path.exists()
 }
 
-pub fn analyze_single_file(
-    _analyzer: &Analyzer,
-    _vuln_db: &crate::vulndb::VulnDatabase,
-    _content: &str,
-    file_name: &str,
-) -> FileAnalysisResult {
-    FileAnalysisResult {
-        file_path: file_name.to_string(),
-        ..Default::default()
-    }
+// ── Cache ────────────────────────────────────────────────────────────────────
+
+fn sha256_hex(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
-pub fn run_with_timeout<F, T>(_timeout: Option<std::time::Duration>, f: F) -> Option<T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    Some(f())
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct CacheEntry {
+    hash: String,
+    result: FileAnalysisResult,
 }
 
-pub fn is_soroban_project(path: &Path) -> bool {
-    // Allow analysing individual .rs files directly (e.g. in tests)
-    if path.is_file() {
-        if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            return true;
-        }
-        if path.file_name().and_then(|s| s.to_str()) == Some("Cargo.toml") {
-            if let Ok(content) = fs::read_to_string(path) {
-                return content.contains("soroban-sdk");
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct AnalysisCache {
+    version: String,
+    entries: HashMap<String, CacheEntry>,
+    #[serde(skip)]
+    path: PathBuf,
+}
+
+impl AnalysisCache {
+    fn load(project_root: &Path) -> Self {
+        let path = project_root.join(".sanctifier_cache.json");
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(mut cache) = serde_json::from_str::<AnalysisCache>(&content) {
+                if cache.version == "1" {
+                    cache.path = path;
+                    return cache;
+                }
             }
-            return false;
+        }
+        Self {
+            version: "1".to_string(),
+            entries: HashMap::new(),
+            path,
         }
     }
 
-    if path.is_dir() {
-        let cargo_toml = path.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(content) = fs::read_to_string(&cargo_toml) {
-                return content.contains("soroban-sdk");
-            }
+    fn save(&self) {
+        if let Ok(content) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(&self.path, content);
         }
-        return false;
     }
 
-    false
+    fn lookup(&self, file_path: &str, hash: &str) -> Option<FileAnalysisResult> {
+        self.entries
+            .get(file_path)
+            .filter(|e| e.hash == hash)
+            .map(|e| e.result.clone())
+    }
+
+    fn store(&mut self, file_path: String, hash: String, result: FileAnalysisResult) {
+        self.entries.insert(file_path, CacheEntry { hash, result });
+    }
 }
