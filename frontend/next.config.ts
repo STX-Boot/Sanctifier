@@ -4,8 +4,10 @@ const isDev = process.env.NODE_ENV === "development";
 const cspReportOnly = process.env.CSP_REPORT_ONLY === "1";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   reactCompiler: true,
+  turbopack: {
+    root: __dirname,
+  },
   async headers() {
     const cspDirectives = [
       "default-src 'self'",
@@ -59,4 +61,5 @@ const nextConfig: NextConfig = {
 };
 
 export default nextConfig;
+
 
