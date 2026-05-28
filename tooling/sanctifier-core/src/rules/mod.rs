@@ -36,6 +36,8 @@ pub mod unused_variable;
 pub mod variable_shadowing;
 /// Raw `invoke_contract` call without `try_invoke_contract` error handling.
 pub mod raw_invoke_contract;
+/// `#[test]` functions that never reference a `ContractClient`.
+pub mod shallow_test;
 /// transfer_from-style flows that consume 'from' balance without allowance checks.
 pub mod transfer_from_no_allowance;
 use serde::Serialize;
@@ -199,6 +201,7 @@ impl RuleRegistry {
         registry.register(missing_state_event::MissingStateEventRule::new());
         registry.register(instance_storage_misuse::InstanceStorageMisuseRule::new());
         registry.register(raw_invoke_contract::RawInvokeContractRule::new());
+        registry.register(shallow_test::ShallowTestRule::new());
         registry.register(transfer_from_no_allowance::TransferFromNoAllowanceRule::new());
         registry
     }

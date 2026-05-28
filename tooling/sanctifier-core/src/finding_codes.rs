@@ -67,6 +67,8 @@ pub const MISSING_STATE_EVENT: &str = "S020";
 pub const INSTANCE_STORAGE_MISUSE: &str = "S021";
 /// Raw `invoke_contract` call without `try_invoke_contract` error handling.
 pub const RAW_INVOKE_CONTRACT: &str = "S022";
+/// `#[test]` function that never references a `ContractClient`, bypassing the host-function boundary.
+pub const SHALLOW_TEST: &str = "S023";
 /// transfer_from-style function consumes 'from' balance without allowance check.
 pub const TRANSFER_FROM_NO_ALLOWANCE: &str = "S023";
 
@@ -202,6 +204,9 @@ pub fn all_finding_codes() -> Vec<FindingCode> {
             description: "Cross-contract call via `invoke_contract` panics on callee failure; use `try_invoke_contract` with explicit Result handling",
         },
         FindingCode {
+            code: SHALLOW_TEST,
+            category: "test_quality",
+            description: "#[test] function never references a ContractClient, bypassing serialization and auth paths exercised by the Soroban host-function boundary",
             code: TRANSFER_FROM_NO_ALLOWANCE,
             category: "token_safety",
             description: "transfer_from-style function moves 'from' balance without checking or decrementing the spender's allowance, allowing any caller to drain any account",
@@ -241,6 +246,7 @@ mod tests {
         assert!(codes.iter().any(|c| c.code == MISSING_STATE_EVENT));
         assert!(codes.iter().any(|c| c.code == INSTANCE_STORAGE_MISUSE));
         assert!(codes.iter().any(|c| c.code == RAW_INVOKE_CONTRACT));
+        assert!(codes.iter().any(|c| c.code == SHALLOW_TEST));
         assert!(codes.iter().any(|c| c.code == TRANSFER_FROM_NO_ALLOWANCE));
     }
 }
