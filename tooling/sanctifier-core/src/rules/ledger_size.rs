@@ -40,7 +40,6 @@ impl LedgerSizeRule {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeWarningLevel {
     ExceedsLimit,

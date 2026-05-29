@@ -5,7 +5,11 @@ mod logging;
 mod vulndb;
 
 #[derive(Parser)]
-#[command(name = "sanctifier", version, about = "Soroban smart contract security analyzer")]
+#[command(
+    name = "sanctifier",
+    version,
+    about = "Soroban smart contract security analyzer"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

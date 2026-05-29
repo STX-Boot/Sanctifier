@@ -1,9 +1,9 @@
+use quote::quote;
 use serde::Serialize;
+use std::collections::HashMap;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{Expr, ExprCall, ExprMacro, ItemConst, Lit};
-use syn::spanned::Spanned;
-use std::collections::HashMap;
-use quote::quote;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct StorageCollisionIssue {
@@ -26,6 +26,7 @@ pub struct KeyInfo {
     pub line: usize,
 }
 
+#[allow(clippy::new_without_default)]
 impl StorageVisitor {
     pub fn new() -> Self {
         Self {
@@ -34,6 +35,8 @@ impl StorageVisitor {
         }
     }
 
+
+
     fn add_key(&mut self, value: String, key_type: String, location: String, line: usize) {
         let info = KeyInfo {
             value: value.clone(),
@@ -41,7 +44,7 @@ impl StorageVisitor {
             location,
             line,
         };
-        self.keys.entry(value).or_insert_with(Vec::new).push(info);
+        self.keys.entry(value).or_default().push(info);
     }
 
     pub fn final_check(&mut self) {
@@ -49,11 +52,13 @@ impl StorageVisitor {
             if infos.len() > 1 {
                 for i in 0..infos.len() {
                     let current = &infos[i];
-                    let others: Vec<String> = infos.iter().enumerate()
+                    let others: Vec<String> = infos
+                        .iter()
+                        .enumerate()
                         .filter(|(idx, _)| *idx != i)
                         .map(|(_, info)| format!("{} (line {})", info.location, info.line))
                         .collect();
-                    
+
                     self.collisions.push(StorageCollisionIssue {
                         key_value: value.clone(),
                         key_type: current.key_type.clone(),
@@ -89,13 +94,16 @@ impl<'ast> Visit<'ast> for StorageVisitor {
             if path.segments.len() >= 2 {
                 let seg1 = &path.segments[0].ident;
                 let seg2 = &path.segments[1].ident;
-                if seg1 == "Symbol" && seg2 == "new" {
-                    if i.args.len() >= 2 {
-                        if let Expr::Lit(expr_lit) = &i.args[1] {
-                            if let Lit::Str(lit_str) = &expr_lit.lit {
-                                let val = lit_str.value();
-                                self.add_key(val, "Symbol::new".to_string(), "inline".to_string(), i.span().start().line);
-                            }
+                if seg1 == "Symbol" && seg2 == "new" && i.args.len() >= 2 {
+                    if let Expr::Lit(expr_lit) = &i.args[1] {
+                        if let Lit::Str(lit_str) = &expr_lit.lit {
+                            let val = lit_str.value();
+                            self.add_key(
+                                val,
+                                "Symbol::new".to_string(),
+                                "inline".to_string(),
+                                i.span().start().line,
+                            );
                         }
                     }
                 }
@@ -105,13 +113,24 @@ impl<'ast> Visit<'ast> for StorageVisitor {
     }
 
     fn visit_expr_macro(&mut self, i: &'ast ExprMacro) {
-        let macro_name = i.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+        let macro_name = i
+            .mac
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
         if macro_name == "symbol_short" {
             let tokens = &i.mac.tokens;
             let token_str = quote!(#tokens).to_string();
             // symbol_short!("...") -> token_str might be "\" ... \""
             let val = token_str.trim_matches('"').to_string();
-            self.add_key(val, "symbol_short!".to_string(), "inline".to_string(), i.span().start().line);
+            self.add_key(
+                val,
+                "symbol_short!".to_string(),
+                "inline".to_string(),
+                i.span().start().line,
+            );
         }
         syn::visit::visit_expr_macro(self, i);
     }

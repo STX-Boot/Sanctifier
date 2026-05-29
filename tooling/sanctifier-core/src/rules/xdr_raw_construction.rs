@@ -129,7 +129,11 @@ mod tests {
 
         let violations = rule.check(&source);
 
-        assert_eq!(violations.len(), 2, "Expected two direct xdr::ScVal constructions");
+        assert_eq!(
+            violations.len(),
+            2,
+            "Expected two direct xdr::ScVal constructions"
+        );
         assert_eq!(violations[0].severity, Severity::Info);
         assert!(violations[0]
             .suggestion

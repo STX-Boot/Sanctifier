@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+
 use assert_cmd::Command;
 use jsonschema::JSONSchema;
 use std::env;

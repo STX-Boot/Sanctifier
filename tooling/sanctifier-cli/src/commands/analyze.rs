@@ -1,8 +1,8 @@
-use std::fs;
-use std::path::{Path, PathBuf};
 use clap::Args;
 use colored::*;
 use sanctifier_core::{Analyzer, SanctifyConfig};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
 pub struct AnalyzeArgs {
@@ -28,26 +28,27 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
         "✨".green(),
         path
     );
-    
+
     let config = SanctifyConfig::default();
     let analyzer = Analyzer::new(config);
-    
+
     let mut collisions = Vec::new();
 
     if path.is_dir() {
         walk_dir(path, &analyzer, &mut collisions)?;
-    } else {
-        if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            if let Ok(content) = fs::read_to_string(path) {
-                collisions.extend(analyzer.scan_storage_collisions(&content));
-            }
+    } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+        if let Ok(content) = fs::read_to_string(path) {
+            collisions.extend(analyzer.scan_storage_collisions(&content));
         }
     }
 
     if collisions.is_empty() {
         println!("\n{} No storage key collisions found.", "✅".green());
     } else {
-        println!("\n{} Found potential Storage Key Collisions!", "⚠️".yellow());
+        println!(
+            "\n{} Found potential Storage Key Collisions!",
+            "⚠️".yellow()
+        );
         for collision in collisions {
             println!("   {} Value: {}", "->".red(), collision.key_value.bold());
             println!("      Type: {}", collision.key_type);
@@ -55,11 +56,15 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
             println!("      Message: {}", collision.message);
         }
     }
-    
+
     Ok(())
 }
 
-fn walk_dir(dir: &Path, analyzer: &Analyzer, collisions: &mut Vec<sanctifier_core::StorageCollisionIssue>) -> anyhow::Result<()> {
+fn walk_dir(
+    dir: &Path,
+    analyzer: &Analyzer,
+    collisions: &mut Vec<sanctifier_core::StorageCollisionIssue>,
+) -> anyhow::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

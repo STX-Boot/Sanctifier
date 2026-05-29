@@ -13,12 +13,12 @@ pub mod ledger_size;
 pub mod panic_detection;
 /// Shadow storage pattern detection.
 pub mod shadow_storage;
-/// Direct xdr::ScVal raw construction detection.
-pub mod xdr_raw_construction;
 /// Unhandled `Result` values.
 pub mod unhandled_result;
 /// Unused local variables.
 pub mod unused_variable;
+/// Direct xdr::ScVal raw construction detection.
+pub mod xdr_raw_construction;
 
 use serde::Serialize;
 use std::any::Any;

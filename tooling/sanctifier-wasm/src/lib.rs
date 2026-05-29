@@ -9,7 +9,7 @@
 //! * [`analyze_with_config`] — run with a JSON-serialised [`SanctifyConfig`].
 
 use sanctifier_core::{
-    finding_codes, Analyzer, ArithmeticIssue, AuthGapIssue, EventIssue, PanicIssue, SanctifyConfig,
+    finding_codes, Analyzer, ArithmeticIssue, EventIssue, PanicIssue, SanctifyConfig,
     SizeWarning, StorageCollisionIssue, UnhandledResultIssue, UnsafePattern,
 };
 use serde::Serialize;

@@ -1,33 +1,33 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use soroban_sdk::Env;
 use std::collections::HashSet;
 use std::panic::{self, AssertUnwindSafe};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{parse_str, Fields, File, Item, Meta, Type};
-use soroban_sdk::Env;
 use thiserror::Error;
-use regex::Regex;
 
-pub mod rules;
-pub mod gas_estimator;
-pub mod gas_report;
-pub mod sep41;
 pub mod complexity;
 pub mod finding_codes;
+pub mod gas_estimator;
+pub mod gas_report;
 pub mod patcher;
 pub mod reentrancy;
-pub mod storage_collision;
+pub mod rules;
+pub mod sep41;
 pub mod smt;
+pub mod storage_collision;
 
 // Re-export common types for easier CLI access
-pub use rules::{Patch, Rule, RuleRegistry, RuleViolation, Severity};
+pub use complexity::{ContractMetrics, FunctionMetrics};
 pub use finding_codes::FindingSeverity as RuleSeverity;
 pub use finding_codes::FindingSeverity;
-pub use sep41::{Sep41Issue, Sep41IssueKind, Sep41VerificationReport};
-pub use storage_collision::StorageCollisionIssue;
-pub use smt::SmtInvariantIssue;
 pub use reentrancy::ReentrancyEdge;
-pub use complexity::{ContractMetrics, FunctionMetrics};
+pub use rules::{Patch, Rule, RuleRegistry, RuleViolation, Severity};
+pub use sep41::{Sep41Issue, Sep41IssueKind, Sep41VerificationReport};
+pub use smt::SmtInvariantIssue;
+pub use storage_collision::StorageCollisionIssue;
 
 // ── Panic Guard ───────────────────────────────────────────────────────────────
 
@@ -74,12 +74,23 @@ pub struct SanctifyConfig {
     pub rules: Vec<CustomRule>,
 }
 
-fn default_ignore_paths() -> Vec<String> { vec!["target".to_string(), ".git".to_string()] }
-fn default_enabled_rules() -> Vec<String> {
-    vec!["auth_gaps".to_string(), "panics".to_string(), "arithmetic".to_string(), "ledger_size".to_string()]
+fn default_ignore_paths() -> Vec<String> {
+    vec!["target".to_string(), ".git".to_string()]
 }
-fn default_ledger_limit() -> usize { DEFAULT_LEDGER_ENTRY_LIMIT }
-fn default_approaching_threshold() -> f64 { DEFAULT_APPROACHING_THRESHOLD }
+fn default_enabled_rules() -> Vec<String> {
+    vec![
+        "auth_gaps".to_string(),
+        "panics".to_string(),
+        "arithmetic".to_string(),
+        "ledger_size".to_string(),
+    ]
+}
+fn default_ledger_limit() -> usize {
+    DEFAULT_LEDGER_ENTRY_LIMIT
+}
+fn default_approaching_threshold() -> f64 {
+    DEFAULT_APPROACHING_THRESHOLD
+}
 
 impl Default for SanctifyConfig {
     fn default() -> Self {
@@ -97,7 +108,10 @@ impl Default for SanctifyConfig {
 // ── Finding types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
-pub enum SizeWarningLevel { ExceedsLimit, ApproachingLimit }
+pub enum SizeWarningLevel {
+    ExceedsLimit,
+    ApproachingLimit,
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SizeWarning {
@@ -108,7 +122,11 @@ pub struct SizeWarning {
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
-pub enum PatternType { Panic, Unwrap, Expect }
+pub enum PatternType {
+    Panic,
+    Unwrap,
+    Expect,
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub struct UnsafePattern {
@@ -274,7 +292,9 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
-    pub fn new(config: SanctifyConfig) -> Self { Self { config } }
+    pub fn new(config: SanctifyConfig) -> Self {
+        Self { config }
+    }
     pub fn run_rule(&self, source: &str, rule_name: &str) -> Vec<RuleViolation> {
         let registry = rules::RuleRegistry::with_default_rules();
         registry.run_by_name(source, rule_name)
@@ -304,10 +324,17 @@ impl Analyzer {
     pub fn analyze_custom_rules(&self, source: &str) -> Vec<CustomRuleMatch> {
         let mut matches = Vec::new();
         for rule in &self.config.rules {
-            let re = match Regex::new(&rule.pattern) { Ok(r) => r, Err(_) => continue };
+            let re = match Regex::new(&rule.pattern) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
             for (line_no, line) in source.lines().enumerate() {
                 if re.find(line).is_some() {
-                    matches.push(CustomRuleMatch { rule_name: rule.name.clone(), line: line_no + 1, snippet: line.trim().to_string() });
+                    matches.push(CustomRuleMatch {
+                        rule_name: rule.name.clone(),
+                        line: line_no + 1,
+                        snippet: line.trim().to_string(),
+                    });
                 }
             }
         }
@@ -334,7 +361,9 @@ impl Analyzer {
                             let mut has_mutation = false;
                             let mut has_auth = false;
                             self.check_fn_body(&f.block, &mut has_mutation, &mut has_auth);
-                            if has_mutation && !has_auth { gaps.push(fn_name); }
+                            if has_mutation && !has_auth {
+                                gaps.push(fn_name);
+                            }
                         }
                     }
                 }
@@ -348,7 +377,10 @@ impl Analyzer {
     }
 
     fn scan_panics_impl(&self, source: &str) -> Vec<PanicIssue> {
-        let file = match parse_str::<File>(source) { Ok(f) => f, Err(_) => return vec![] };
+        let file = match parse_str::<File>(source) {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
         let mut issues = Vec::new();
         for item in &file.items {
             if let Item::Impl(i) = item {
@@ -366,8 +398,20 @@ impl Analyzer {
         for stmt in &block.stmts {
             match stmt {
                 syn::Stmt::Expr(expr, _) => self.check_expr_panics(expr, fn_name, issues),
-                syn::Stmt::Local(local) => { if let Some(init) = &local.init { self.check_expr_panics(&init.expr, fn_name, issues); } }
-                syn::Stmt::Macro(m) => { if m.mac.path.is_ident("panic") { issues.push(PanicIssue { function_name: fn_name.to_string(), issue_type: "panic!".to_string(), location: fn_name.to_string() }); } }
+                syn::Stmt::Local(local) => {
+                    if let Some(init) = &local.init {
+                        self.check_expr_panics(&init.expr, fn_name, issues);
+                    }
+                }
+                syn::Stmt::Macro(m) => {
+                    if m.mac.path.is_ident("panic") {
+                        issues.push(PanicIssue {
+                            function_name: fn_name.to_string(),
+                            issue_type: "panic!".to_string(),
+                            location: fn_name.to_string(),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -375,23 +419,47 @@ impl Analyzer {
 
     fn check_expr_panics(&self, expr: &syn::Expr, fn_name: &str, issues: &mut Vec<PanicIssue>) {
         match expr {
-            syn::Expr::Macro(m) => { if m.mac.path.is_ident("panic") { issues.push(PanicIssue { function_name: fn_name.to_string(), issue_type: "panic!".to_string(), location: fn_name.to_string() }); } }
+            syn::Expr::Macro(m) => {
+                if m.mac.path.is_ident("panic") {
+                    issues.push(PanicIssue {
+                        function_name: fn_name.to_string(),
+                        issue_type: "panic!".to_string(),
+                        location: fn_name.to_string(),
+                    });
+                }
+            }
             syn::Expr::MethodCall(m) => {
                 let method_name = m.method.to_string();
-                if method_name == "unwrap" || method_name == "expect" { issues.push(PanicIssue { function_name: fn_name.to_string(), issue_type: method_name, location: fn_name.to_string() }); }
+                if method_name == "unwrap" || method_name == "expect" {
+                    issues.push(PanicIssue {
+                        function_name: fn_name.to_string(),
+                        issue_type: method_name,
+                        location: fn_name.to_string(),
+                    });
+                }
                 self.check_expr_panics(&m.receiver, fn_name, issues);
-                for arg in &m.args { self.check_expr_panics(arg, fn_name, issues); }
+                for arg in &m.args {
+                    self.check_expr_panics(arg, fn_name, issues);
+                }
             }
-            syn::Expr::Call(c) => { for arg in &c.args { self.check_expr_panics(arg, fn_name, issues); } }
+            syn::Expr::Call(c) => {
+                for arg in &c.args {
+                    self.check_expr_panics(arg, fn_name, issues);
+                }
+            }
             syn::Expr::Block(b) => self.check_fn_panics(&b.block, fn_name, issues),
             syn::Expr::If(i) => {
                 self.check_expr_panics(&i.cond, fn_name, issues);
                 self.check_fn_panics(&i.then_branch, fn_name, issues);
-                if let Some((_, else_expr)) = &i.else_branch { self.check_expr_panics(else_expr, fn_name, issues); }
+                if let Some((_, else_expr)) = &i.else_branch {
+                    self.check_expr_panics(else_expr, fn_name, issues);
+                }
             }
             syn::Expr::Match(m) => {
                 self.check_expr_panics(&m.expr, fn_name, issues);
-                for arm in &m.arms { self.check_expr_panics(&arm.body, fn_name, issues); }
+                for arm in &m.arms {
+                    self.check_expr_panics(&arm.body, fn_name, issues);
+                }
             }
             _ => {}
         }
@@ -401,8 +469,18 @@ impl Analyzer {
         for stmt in &block.stmts {
             match stmt {
                 syn::Stmt::Expr(expr, _) => self.check_expr(expr, has_mutation, has_auth),
-                syn::Stmt::Local(local) => { if let Some(init) = &local.init { self.check_expr(&init.expr, has_mutation, has_auth); } }
-                syn::Stmt::Macro(m) => { if m.mac.path.is_ident("require_auth") || m.mac.path.is_ident("require_auth_for_args") { *has_auth = true; } }
+                syn::Stmt::Local(local) => {
+                    if let Some(init) = &local.init {
+                        self.check_expr(&init.expr, has_mutation, has_auth);
+                    }
+                }
+                syn::Stmt::Macro(m) => {
+                    if m.mac.path.is_ident("require_auth")
+                        || m.mac.path.is_ident("require_auth_for_args")
+                    {
+                        *has_auth = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -414,30 +492,48 @@ impl Analyzer {
                 if let syn::Expr::Path(p) = &*c.func {
                     if let Some(segment) = p.path.segments.last() {
                         let ident = segment.ident.to_string();
-                        if ident == "require_auth" || ident == "require_auth_for_args" { *has_auth = true; }
+                        if ident == "require_auth" || ident == "require_auth_for_args" {
+                            *has_auth = true;
+                        }
                     }
                 }
-                for arg in &c.args { self.check_expr(arg, has_mutation, has_auth); }
+                for arg in &c.args {
+                    self.check_expr(arg, has_mutation, has_auth);
+                }
             }
             syn::Expr::MethodCall(m) => {
                 let method_name = m.method.to_string();
                 if method_name == "set" || method_name == "update" || method_name == "remove" {
                     let receiver_str = quote::quote!(#m.receiver).to_string();
-                    if receiver_str.contains("storage") || receiver_str.contains("persistent") || receiver_str.contains("temporary") || receiver_str.contains("instance") { *has_mutation = true; }
+                    if receiver_str.contains("storage")
+                        || receiver_str.contains("persistent")
+                        || receiver_str.contains("temporary")
+                        || receiver_str.contains("instance")
+                    {
+                        *has_mutation = true;
+                    }
                 }
-                if method_name == "require_auth" || method_name == "require_auth_for_args" { *has_auth = true; }
+                if method_name == "require_auth" || method_name == "require_auth_for_args" {
+                    *has_auth = true;
+                }
                 self.check_expr(&m.receiver, has_mutation, has_auth);
-                for arg in &m.args { self.check_expr(arg, has_mutation, has_auth); }
+                for arg in &m.args {
+                    self.check_expr(arg, has_mutation, has_auth);
+                }
             }
             syn::Expr::Block(b) => self.check_fn_body(&b.block, has_mutation, has_auth),
             syn::Expr::If(i) => {
                 self.check_expr(&i.cond, has_mutation, has_auth);
                 self.check_fn_body(&i.then_branch, has_mutation, has_auth);
-                if let Some((_, else_expr)) = &i.else_branch { self.check_expr(else_expr, has_mutation, has_auth); }
+                if let Some((_, else_expr)) = &i.else_branch {
+                    self.check_expr(else_expr, has_mutation, has_auth);
+                }
             }
             syn::Expr::Match(m) => {
                 self.check_expr(&m.expr, has_mutation, has_auth);
-                for arm in &m.arms { self.check_expr(&arm.body, has_mutation, has_auth); }
+                for arm in &m.arms {
+                    self.check_expr(&arm.body, has_mutation, has_auth);
+                }
             }
             _ => {}
         }
@@ -478,7 +574,10 @@ impl Analyzer {
     }
 
     fn analyze_ledger_size_impl(&self, source: &str) -> Vec<SizeWarning> {
-        let file = match parse_str::<File>(source) { Ok(f) => f, Err(_) => return vec![] };
+        let file = match parse_str::<File>(source) {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
         let mut warnings = Vec::new();
         let limit = self.config.ledger_limit;
         let approaching = (limit as f64 * self.config.approaching_threshold) as usize;
@@ -490,16 +589,30 @@ impl Analyzer {
                 Item::Struct(s) => {
                     if has_contracttype(&s.attrs) {
                         let size = self.estimate_struct_size(s);
-                        if let Some(level) = classify_size(size, limit, approaching, strict, strict_threshold) {
-                            warnings.push(SizeWarning { struct_name: s.ident.to_string(), estimated_size: size, limit, level });
+                        if let Some(level) =
+                            classify_size(size, limit, approaching, strict, strict_threshold)
+                        {
+                            warnings.push(SizeWarning {
+                                struct_name: s.ident.to_string(),
+                                estimated_size: size,
+                                limit,
+                                level,
+                            });
                         }
                     }
                 }
                 Item::Enum(e) => {
                     if has_contracttype(&e.attrs) {
                         let size = self.estimate_enum_size(e);
-                        if let Some(level) = classify_size(size, limit, approaching, strict, strict_threshold) {
-                            warnings.push(SizeWarning { struct_name: e.ident.to_string(), estimated_size: size, limit, level });
+                        if let Some(level) =
+                            classify_size(size, limit, approaching, strict, strict_threshold)
+                        {
+                            warnings.push(SizeWarning {
+                                struct_name: e.ident.to_string(),
+                                estimated_size: size,
+                                limit,
+                                level,
+                            });
                         }
                     }
                 }
@@ -514,8 +627,13 @@ impl Analyzer {
     }
 
     fn analyze_unsafe_patterns_impl(&self, source: &str) -> Vec<UnsafePattern> {
-        let file = match parse_str::<File>(source) { Ok(f) => f, Err(_) => return vec![] };
-        let mut visitor = UnsafeVisitor { patterns: Vec::new() };
+        let file = match parse_str::<File>(source) {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
+        let mut visitor = UnsafeVisitor {
+            patterns: Vec::new(),
+        };
         visitor.visit_file(&file);
         visitor.patterns
     }
@@ -525,21 +643,29 @@ impl Analyzer {
     }
 
     fn scan_arithmetic_overflow_impl(&self, source: &str) -> Vec<ArithmeticIssue> {
-        let file = match parse_str::<File>(source) { Ok(f) => f, Err(_) => return vec![] };
-        let mut visitor = ArithVisitor { issues: Vec::new(), current_fn: None, seen: HashSet::new() };
+        let file = match parse_str::<File>(source) {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
+        let mut visitor = ArithVisitor {
+            issues: Vec::new(),
+            current_fn: None,
+            seen: HashSet::new(),
+        };
         visitor.visit_file(&file);
         visitor.issues
     }
 
     pub fn scan_gas_estimation(&self, source: &str) -> Vec<GasEstimation> {
         let reports = gas_estimator::GasEstimator::new().estimate_contract(source);
-        reports.into_iter().map(|r| {
-            GasEstimation {
+        reports
+            .into_iter()
+            .map(|r| GasEstimation {
                 function_name: r.function_name,
                 estimated_gas: r.estimated_instructions as u64,
                 complexity_score: 0,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     // ── Upgrade pattern analysis ──────────────────────────────────────────────
@@ -629,7 +755,8 @@ impl Analyzer {
                                     "Upgrade function '{}' may use delay/timelock",
                                     fn_name
                                 ),
-                                suggestion: "Verify timelock delay is enforced before upgrade".to_string(),
+                                suggestion: "Verify timelock delay is enforced before upgrade"
+                                    .to_string(),
                             });
                         }
                     }
@@ -667,8 +794,16 @@ impl Analyzer {
         for v in &e.variants {
             let mut variant_size = 0;
             match &v.fields {
-                Fields::Named(fields) => { for f in &fields.named { variant_size += self.estimate_type_size(&f.ty); } }
-                Fields::Unnamed(fields) => { for f in &fields.unnamed { variant_size += self.estimate_type_size(&f.ty); } }
+                Fields::Named(fields) => {
+                    for f in &fields.named {
+                        variant_size += self.estimate_type_size(&f.ty);
+                    }
+                }
+                Fields::Unnamed(fields) => {
+                    for f in &fields.unnamed {
+                        variant_size += self.estimate_type_size(&f.ty);
+                    }
+                }
                 Fields::Unit => {}
             }
             max_variant = max_variant.max(variant_size);
@@ -679,8 +814,16 @@ impl Analyzer {
     fn estimate_struct_size(&self, s: &syn::ItemStruct) -> usize {
         let mut total = 0;
         match &s.fields {
-            Fields::Named(fields) => { for f in &fields.named { total += self.estimate_type_size(&f.ty); } }
-            Fields::Unnamed(fields) => { for f in &fields.unnamed { total += self.estimate_type_size(&f.ty); } }
+            Fields::Named(fields) => {
+                for f in &fields.named {
+                    total += self.estimate_type_size(&f.ty);
+                }
+            }
+            Fields::Unnamed(fields) => {
+                for f in &fields.unnamed {
+                    total += self.estimate_type_size(&f.ty);
+                }
+            }
             Fields::Unit => {}
         }
         total
@@ -696,25 +839,86 @@ impl Analyzer {
                         "u128" | "i128" | "I128" | "U128" => 16,
                         "Address" => 32,
                         "Bytes" | "BytesN" | "String" | "Symbol" => 64,
-                        "Vec" => { if let syn::PathArguments::AngleBracketed(args) = &seg.arguments { if let Some(syn::GenericArgument::Type(inner)) = args.args.first() { return 8 + self.estimate_type_size(inner); } } 128 }
-                        "Map" => { if let syn::PathArguments::AngleBracketed(args) = &seg.arguments { let inner: usize = args.args.iter().filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(self.estimate_type_size(t)) } else { None }).sum(); if inner > 0 { return 16 + inner * 2; } } 128 }
-                        "Option" => { if let syn::PathArguments::AngleBracketed(args) = &seg.arguments { if let Some(syn::GenericArgument::Type(inner)) = args.args.first() { return 1 + self.estimate_type_size(inner); } } 32 }
+                        "Vec" => {
+                            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                                    return 8 + self.estimate_type_size(inner);
+                                }
+                            }
+                            128
+                        }
+                        "Map" => {
+                            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                                let inner: usize = args
+                                    .args
+                                    .iter()
+                                    .filter_map(|a| {
+                                        if let syn::GenericArgument::Type(t) = a {
+                                            Some(self.estimate_type_size(t))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .sum();
+                                if inner > 0 {
+                                    return 16 + inner * 2;
+                                }
+                            }
+                            128
+                        }
+                        "Option" => {
+                            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                                    return 1 + self.estimate_type_size(inner);
+                                }
+                            }
+                            32
+                        }
                         _ => 32,
                     }
-                } else { 8 }
+                } else {
+                    8
+                }
             }
-            Type::Array(arr) => { if let syn::Expr::Lit(expr_lit) = &arr.len { if let syn::Lit::Int(lit) = &expr_lit.lit { if let Ok(n) = lit.base10_parse::<usize>() { return n * self.estimate_type_size(&arr.elem); } } } 64 }
+            Type::Array(arr) => {
+                if let syn::Expr::Lit(expr_lit) = &arr.len {
+                    if let syn::Lit::Int(lit) = &expr_lit.lit {
+                        if let Ok(n) = lit.base10_parse::<usize>() {
+                            return n * self.estimate_type_size(&arr.elem);
+                        }
+                    }
+                }
+                64
+            }
             _ => 8,
         }
     }
 }
 
 fn has_contracttype(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| if let Meta::Path(path) = &attr.meta { path.is_ident("contracttype") || path.segments.iter().any(|s| s.ident == "contracttype") } else { false })
+    attrs.iter().any(|attr| {
+        if let Meta::Path(path) = &attr.meta {
+            path.is_ident("contracttype") || path.segments.iter().any(|s| s.ident == "contracttype")
+        } else {
+            false
+        }
+    })
 }
 
-fn classify_size(size: usize, limit: usize, approaching: usize, strict: bool, strict_threshold: usize) -> Option<SizeWarningLevel> {
-    if size > limit { Some(SizeWarningLevel::ExceedsLimit) } else if size > approaching || (strict && size > strict_threshold) { Some(SizeWarningLevel::ApproachingLimit) } else { None }
+fn classify_size(
+    size: usize,
+    limit: usize,
+    approaching: usize,
+    strict: bool,
+    strict_threshold: usize,
+) -> Option<SizeWarningLevel> {
+    if size > limit {
+        Some(SizeWarningLevel::ExceedsLimit)
+    } else if size > approaching || (strict && size > strict_threshold) {
+        Some(SizeWarningLevel::ApproachingLimit)
+    } else {
+        None
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -725,8 +929,10 @@ mod tests {
 
     #[test]
     fn test_analyze_with_limit() {
-        let mut config = SanctifyConfig::default();
-        config.ledger_limit = 50;
+        let config = SanctifyConfig {
+            ledger_limit: 50,
+            ..Default::default()
+        };
         let analyzer = Analyzer::new(config);
         let source = r#"
             #[contracttype]
@@ -782,8 +988,16 @@ struct UnsafeVisitor {
 impl<'ast> Visit<'ast> for UnsafeVisitor {
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if node.path.is_ident("panic") {
-            let line = node.path.get_ident().map(|i| i.span().start().line).unwrap_or(0);
-            self.patterns.push(UnsafePattern { pattern_type: PatternType::Panic, line, snippet: "panic!()".to_string() });
+            let line = node
+                .path
+                .get_ident()
+                .map(|i| i.span().start().line)
+                .unwrap_or(0);
+            self.patterns.push(UnsafePattern {
+                pattern_type: PatternType::Panic,
+                line,
+                snippet: "panic!()".to_string(),
+            });
         }
         syn::visit::visit_macro(self, node);
     }
@@ -791,8 +1005,16 @@ impl<'ast> Visit<'ast> for UnsafeVisitor {
         let method = node.method.to_string();
         if method == "unwrap" || method == "expect" {
             let line = node.method.span().start().line;
-            let pattern_type = if method == "unwrap" { PatternType::Unwrap } else { PatternType::Expect };
-            self.patterns.push(UnsafePattern { pattern_type, line, snippet: format!(".{}()", method) });
+            let pattern_type = if method == "unwrap" {
+                PatternType::Unwrap
+            } else {
+                PatternType::Expect
+            };
+            self.patterns.push(UnsafePattern {
+                pattern_type,
+                line,
+                snippet: format!(".{}()", method),
+            });
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -1020,9 +1242,15 @@ mod tests_continued {
 
         let arithmetic_issues = analyzer.scan_arithmetic_overflow(source);
         assert_eq!(arithmetic_issues.len(), 3, "Expected 3 arithmetic issues");
-        assert!(arithmetic_issues.iter().any(|issue| issue.function_name == "transfer" && issue.operation == "-"));
-        assert!(arithmetic_issues.iter().any(|issue| issue.function_name == "transfer" && issue.operation == "+"));
-        assert!(arithmetic_issues.iter().any(|issue| issue.function_name == "mint" && issue.operation == "+"));
+        assert!(arithmetic_issues
+            .iter()
+            .any(|issue| issue.function_name == "transfer" && issue.operation == "-"));
+        assert!(arithmetic_issues
+            .iter()
+            .any(|issue| issue.function_name == "transfer" && issue.operation == "+"));
+        assert!(arithmetic_issues
+            .iter()
+            .any(|issue| issue.function_name == "mint" && issue.operation == "+"));
     }
 
     #[test]
@@ -1391,9 +1619,18 @@ impl ArithVisitor {
             syn::BinOp::Add(_) => Some(("+", "Use `.checked_add(rhs)` or `.saturating_add(rhs)`")),
             syn::BinOp::Sub(_) => Some(("-", "Use `.checked_sub(rhs)` or `.saturating_sub(rhs)`")),
             syn::BinOp::Mul(_) => Some(("*", "Use `.checked_mul(rhs)` or `.saturating_mul(rhs)`")),
-            syn::BinOp::AddAssign(_) => Some(("+=", "Replace with `a = a.checked_add(b).expect(\"overflow\")`")),
-            syn::BinOp::SubAssign(_) => Some(("-=", "Replace with `a = a.checked_sub(b).expect(\"underflow\")`")),
-            syn::BinOp::MulAssign(_) => Some(("*=", "Replace with `a = a.checked_mul(b).expect(\"overflow\")`")),
+            syn::BinOp::AddAssign(_) => Some((
+                "+=",
+                "Replace with `a = a.checked_add(b).expect(\"overflow\")`",
+            )),
+            syn::BinOp::SubAssign(_) => Some((
+                "-=",
+                "Replace with `a = a.checked_sub(b).expect(\"underflow\")`",
+            )),
+            syn::BinOp::MulAssign(_) => Some((
+                "*=",
+                "Replace with `a = a.checked_mul(b).expect(\"overflow\")`",
+            )),
             _ => None,
         }
     }
@@ -1420,7 +1657,12 @@ impl<'ast> Visit<'ast> for ArithVisitor {
                     if !self.seen.contains(&key) {
                         self.seen.insert(key);
                         let line = node.left.span().start().line;
-                        self.issues.push(ArithmeticIssue { function_name: fn_name.clone(), operation: op_str.to_string(), suggestion: suggestion.to_string(), location: format!("{}:{}", fn_name, line) });
+                        self.issues.push(ArithmeticIssue {
+                            function_name: fn_name.clone(),
+                            operation: op_str.to_string(),
+                            suggestion: suggestion.to_string(),
+                            location: format!("{}:{}", fn_name, line),
+                        });
                     }
                 }
             }
@@ -1430,5 +1672,11 @@ impl<'ast> Visit<'ast> for ArithVisitor {
 }
 
 fn is_string_literal(expr: &syn::Expr) -> bool {
-    matches!(expr, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. }))
+    matches!(
+        expr,
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(_),
+            ..
+        })
+    )
 }

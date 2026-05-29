@@ -2,7 +2,7 @@
 use quote::quote;
 use serde::Serialize;
 use syn::visit::Visit;
-use syn::{File, ExprMethodCall, ExprCall};
+use syn::{ExprCall, ExprMethodCall, File};
 
 /// Edge representing a cross-contract call.
 #[derive(Debug, Serialize, Clone)]
@@ -19,7 +19,10 @@ pub fn scan_invoke_contract_calls(source: &str) -> Vec<ReentrancyEdge> {
         Err(_) => return vec![],
     };
 
-    let mut visitor = CallVisitor { edges: Vec::new(), current_fn: String::new() };
+    let mut visitor = CallVisitor {
+        edges: Vec::new(),
+        current_fn: String::new(),
+    };
     visitor.visit_file(&file);
     visitor.edges
 }
@@ -42,12 +45,12 @@ impl<'ast> Visit<'ast> for CallVisitor {
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if node.method == "invoke_contract" || node.method == "call" {
-             self.edges.push(ReentrancyEdge {
-                 caller_function: self.current_fn.clone(),
-                 target_contract: "Unknown".to_string(), // Placeholder
-                 target_function: "Unknown".to_string(), // Placeholder
-                 function_expr: Some(quote!(#node).to_string()),
-             });
+            self.edges.push(ReentrancyEdge {
+                caller_function: self.current_fn.clone(),
+                target_contract: "Unknown".to_string(), // Placeholder
+                target_function: "Unknown".to_string(), // Placeholder
+                function_expr: Some(quote!(#node).to_string()),
+            });
         }
         syn::visit::visit_expr_method_call(self, node);
     }
