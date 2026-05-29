@@ -1,9 +1,21 @@
-use clap::Args;
 use crate::commands::color as c;
+use clap::Args;
 use sanctifier_core::{CustomRule, SanctifyConfig};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{error, warn};
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum TelemetrySetting {
+    On,
+    Off,
+}
+
+impl TelemetrySetting {
+    fn as_bool(self) -> bool {
+        matches!(self, Self::On)
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
@@ -14,6 +26,10 @@ pub struct InitArgs {
     /// Force overwrite existing configuration file
     #[arg(short, long)]
     pub force: bool,
+
+    /// Opt into minimal anonymous telemetry collection
+    #[arg(long, value_enum)]
+    pub telemetry: Option<TelemetrySetting>,
 }
 
 pub struct ConfigGenerator;
@@ -29,6 +45,7 @@ impl ConfigGenerator {
                 "ledger_size".to_string(),
             ],
             ledger_limit: 64000,
+            telemetry: false,
             strict_mode: false,
             rules: vec![
                 CustomRule {
@@ -105,7 +122,10 @@ pub fn exec(args: InitArgs, path: Option<PathBuf>) -> anyhow::Result<()> {
     }
 
     // Generate default configuration
-    let config = ConfigGenerator::generate_default_config();
+    let mut config = ConfigGenerator::generate_default_config();
+    if let Some(telemetry) = args.telemetry {
+        config.telemetry = telemetry.as_bool();
+    }
 
     // Write configuration to file
     match FileWriter::write_config(&config, &target_dir) {

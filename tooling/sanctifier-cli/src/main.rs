@@ -10,6 +10,7 @@ use tracing::error;
 
 mod commands;
 mod logging;
+mod telemetry;
 pub mod vulndb;
 
 #[derive(Parser)]

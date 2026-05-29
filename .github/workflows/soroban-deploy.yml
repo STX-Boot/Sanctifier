@@ -107,6 +107,7 @@ jobs:
             --debug
         env:
           SOROBAN_SECRET_KEY: ${{ secrets.SOROBAN_SECRET_KEY }}
+          SOROBAN_ACCOUNT_ID: ${{ secrets.SOROBAN_ACCOUNT_ID }}
 
       - name: Deploy to Soroban testnet
         if: github.event.inputs.dry_run != 'true'
@@ -118,6 +119,7 @@ jobs:
             --debug
         env:
           SOROBAN_SECRET_KEY: ${{ secrets.SOROBAN_SECRET_KEY }}
+          SOROBAN_ACCOUNT_ID: ${{ secrets.SOROBAN_ACCOUNT_ID }}
         timeout-minutes: 30
 
       - name: Upload deployment manifest
@@ -207,6 +209,7 @@ jobs:
           fi
         env:
           SOROBAN_SECRET_KEY: ${{ secrets.SOROBAN_SECRET_KEY }}
+          SOROBAN_ACCOUNT_ID: ${{ secrets.SOROBAN_ACCOUNT_ID }}
 
       - name: Generate validation report
         if: always()

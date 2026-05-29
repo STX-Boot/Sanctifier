@@ -71,6 +71,8 @@ pub struct SanctifyConfig {
     pub ledger_limit: usize,
     #[serde(default = "default_approaching_threshold")]
     pub approaching_threshold: f64,
+    #[serde(default = "default_telemetry_enabled")]
+    pub telemetry: bool,
     #[serde(default)]
     pub strict_mode: bool,
     /// Custom regex rules (field name "rules" in TOML).
@@ -96,6 +98,10 @@ fn default_approaching_threshold() -> f64 {
     DEFAULT_APPROACHING_THRESHOLD
 }
 
+fn default_telemetry_enabled() -> bool {
+    false
+}
+
 impl Default for SanctifyConfig {
     fn default() -> Self {
         Self {
@@ -103,6 +109,7 @@ impl Default for SanctifyConfig {
             enabled_rules: default_enabled_rules(),
             ledger_limit: default_ledger_limit(),
             approaching_threshold: default_approaching_threshold(),
+            telemetry: default_telemetry_enabled(),
             strict_mode: false,
             rules: vec![],
         }

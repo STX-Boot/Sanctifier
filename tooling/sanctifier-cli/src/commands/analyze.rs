@@ -1,3 +1,4 @@
+use crate::telemetry::{self, AnalysisTelemetry};
 use crate::vulndb::{VulnDatabase, VulnMatch};
 use clap::Args;
 use colored::*;
@@ -9,11 +10,12 @@ use sanctifier_core::rules::RuleRegistry;
 use sanctifier_core::{Analyzer, SanctifyConfig};
 use sha2::{Digest, Sha256};
 #[allow(unused_imports)]
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub enum SeverityLevel {
@@ -205,6 +207,7 @@ pub(crate) fn run_analysis(args: AnalyzeArgs) -> anyhow::Result<bool> {
 
     let start = Instant::now();
     let config = load_config(path);
+    let telemetry_enabled = config.telemetry;
     let scan_root = if path.is_file() {
         path.parent().unwrap_or(path).to_path_buf()
     } else {
@@ -235,6 +238,22 @@ pub(crate) fn run_analysis(args: AnalyzeArgs) -> anyhow::Result<bool> {
 
     let total = all_violations.len();
     let duration_ms = start.elapsed().as_millis() as u64;
+    if telemetry_enabled {
+        let rule_ids = all_violations
+            .iter()
+            .map(|(_, violation)| violation.rule_name.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let payload = AnalysisTelemetry {
+            tool_version: telemetry::sanitize_version(env!("CARGO_PKG_VERSION")),
+            duration_ms,
+            rule_ids,
+        };
+        if let Err(err) = telemetry::emit_analysis_telemetry(&payload) {
+            warn!(target: "sanctifier", error = %err, "Failed to submit opt-in telemetry");
+        }
+    }
 
     if args.format == "json" {
         let findings: Vec<serde_json::Value> = all_violations
@@ -770,4 +789,3 @@ fn sha256_hex(content: &str) -> String {
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
 }
-

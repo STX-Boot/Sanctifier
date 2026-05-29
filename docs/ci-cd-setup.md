@@ -104,6 +104,8 @@ gh secret set SOROBAN_ACCOUNT_ID --body "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
 5. Optionally repeat for SOROBAN_ACCOUNT_ID
 
+If you set `SOROBAN_ACCOUNT_ID`, the deployment script can check the live balance before deploy and fund the account from Friendbot on testnet or futurenet when needed.
+
 ### 2.3 Verify Secrets
 
 ```bash
