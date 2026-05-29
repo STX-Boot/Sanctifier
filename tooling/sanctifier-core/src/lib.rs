@@ -16,7 +16,9 @@ pub mod patcher;
 pub mod reentrancy;
 pub mod rules;
 pub mod sep41;
+#[cfg(feature = "smt")]
 pub mod smt;
+pub mod soroban_v21;
 pub mod storage_collision;
 
 // Re-export common types for easier CLI access
@@ -26,6 +28,7 @@ pub use finding_codes::FindingSeverity;
 pub use reentrancy::ReentrancyEdge;
 pub use rules::{Patch, Rule, RuleRegistry, RuleViolation, Severity};
 pub use sep41::{Sep41Issue, Sep41IssueKind, Sep41VerificationReport};
+#[cfg(feature = "smt")]
 pub use smt::SmtInvariantIssue;
 pub use storage_collision::StorageCollisionIssue;
 
@@ -221,6 +224,15 @@ pub struct PanicIssue {
 pub struct ArithmeticIssue {
     pub function_name: String,
     pub operation: String,
+    pub suggestion: String,
+    pub location: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct TruncationBoundsIssue {
+    pub function_name: String,
+    pub kind: String,
+    pub expression: String,
     pub suggestion: String,
     pub location: String,
 }
