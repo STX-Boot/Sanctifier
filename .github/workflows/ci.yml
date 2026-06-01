@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   ci:
@@ -19,16 +20,20 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+
+      - name: Install WASM target
+        run: rustup target add wasm32-unknown-unknown
 
       - name: Cache cargo registry & build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -59,23 +64,24 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           choco install z3 -y
-          $z3_h = (Get-ChildItem -Path C:\ProgramData\chocolatey\lib\z3 -Filter z3.h -Recurse | Select-Object -First 1).FullName
-          if ($z3_h) {
-            $z3_root = Split-Path (Split-Path $z3_h)
-            echo "Z3_SYS_Z3_HEADER=$z3_h" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            echo "LIB=$z3_root\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            Write-Host "Found Z3 header at: $z3_h"
-            Write-Host "Found Z3 lib dir at: $z3_root\lib"
-          } else {
-            Write-Error "Could not find z3.h in Chocolatey package directory"
-            exit 1
-          }
+          echo "Z3_SYS_Z3_HEADER=C:\ProgramData\chocolatey\lib\z3\tools\include\z3.h" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "LIB=C:\ProgramData\chocolatey\lib\z3\tools\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install system dependencies (Linux only)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install dependencies and Lint (make lint smoke test)
+        run: |
+          npm ci
+          make lint
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -95,6 +101,11 @@ jobs:
         run: |
           cargo test -p sanctifier-core --all-features
           cargo test -p sanctifier-cli
+
+      - name: Run action unit tests
+        run: |
+          python -m unittest discover -s tests/action -p "test_*.py"
+          python -m unittest discover -s tests/vulnerability_db -p "test_*.py"
 
       - name: Code coverage (Linux only)
         if: runner.os == 'Linux'
@@ -120,12 +131,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -136,7 +147,7 @@ jobs:
           echo 'module.exports = {};' > tooling/sanctifier-wasm/pkg/index.js
 
       - name: Install frontend dependencies
-        run: cd frontend && npm ci
+        run: cd frontend && npm install
 
       - name: Run unit tests
         run: cd frontend && npm test
@@ -146,11 +157,198 @@ jobs:
         continue-on-error: true
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: frontend-coverage
           path: frontend/coverage/
           retention-days: 7
+
+  docs-specs-integration:
+    name: Docs/specs integration coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate docs/specs coverage
+        run: npm run docs:specs:check
+
+  contracts-sep41-fixtures:
+    name: Contracts SEP-41 Fixture Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Sanctifier CLI
+        run: cargo build -p sanctifier-cli
+
+      - name: Run SEP-41 fixture contract tests
+        run: cargo test -p my-contract
+
+      - name: Validate S012 fixture output via CLI
+        run: |
+          cargo run --quiet --bin sanctifier -- analyze contracts/fixtures/finding-codes/s012_token_interface.rs --format json > /tmp/s012-report.json
+          grep -q '"S012"' /tmp/s012-report.json
+
+  frontend-e2e:
+    name: Frontend E2E Tests (Playwright)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build WASM stub
+        run: |
+          mkdir -p tooling/sanctifier-wasm/pkg
+          echo '{"name":"@sanctifier/wasm","version":"0.0.0","main":"index.js"}' > tooling/sanctifier-wasm/pkg/package.json
+          echo 'module.exports = {};' > tooling/sanctifier-wasm/pkg/index.js
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm install
+
+      - name: Install Playwright browsers
+        run: cd frontend && npx playwright install --with-deps chromium
+
+      - name: Run e2e tests
+        run: cd frontend && npm run test:e2e
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-artifacts
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 7
+
+  frontend-schema-e2e:
+    name: Frontend Schema Rendering E2E
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build WASM stub
+        run: |
+          mkdir -p tooling/sanctifier-wasm/pkg
+          echo '{"name":"@sanctifier/wasm","version":"0.0.0","main":"index.js"}' > tooling/sanctifier-wasm/pkg/package.json
+          echo 'module.exports = {};' > tooling/sanctifier-wasm/pkg/index.js
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm install
+
+      - name: Install Playwright browsers
+        run: cd frontend && npx playwright install --with-deps chromium
+
+      - name: Run schema rendering e2e suite
+        run: cd frontend && npm run test:e2e:schema
+
+  contract-docs:
+    name: Contract ABI / Interface Docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-contract-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-contract-docs-
+
+      - name: Generate contract docs and interface summary
+        run: make contract-docs
+
+      - name: Verify interface summary is up-to-date
+        run: |
+          # Run extraction-only check (rustdoc already generated above)
+          SKIP_RUSTDOC=1 bash scripts/gen-contract-docs.sh --check
+
+      - name: Run ABI surface stability tests (amm-pool)
+        run: cargo test -p amm-pool --test integration_tests abi_ -- --nocapture
+
+      - name: Upload rustdoc artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: contract-rustdoc
+          path: target/doc/
+          retention-days: 14
+
+      - name: Upload interface JSON artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: contract-interfaces-json
+          path: docs/generated/contract-interfaces.json
+          retention-days: 14
+
+  commitlint:
+    name: Lint Commit Messages
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install commitlint
+        run: |
+          cd frontend
+          npm install --save-dev @commitlint/cli @commitlint/config-conventional
+
+      - name: Validate PR commits
+        run: |
+          cd frontend
+          npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
 
   wasm:
     name: Build WASM Package
@@ -158,7 +356,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -166,7 +364,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry & build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -192,9 +390,13 @@ jobs:
             pkg.name = '@sanctifier/wasm';
             fs.writeFileSync('pkg/package.json', JSON.stringify(pkg, null, 2));
           "
+      - name: Verify CSP Compliance
+        run: |
+          cd tooling/sanctifier-wasm
+          node scripts/verify-csp-compliance.js
 
       - name: Upload WASM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: sanctifier-wasm-pkg
           path: tooling/sanctifier-wasm/pkg/
