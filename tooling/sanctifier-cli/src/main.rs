@@ -21,6 +21,8 @@ enum Commands {
     Analyze(commands::analyze::AnalyzeArgs),
     /// Initialize a .sanctify.toml configuration file
     Init(commands::init::InitArgs),
+    /// Language Server Protocol (LSP) for editor integration
+    Lsp(commands::lsp::LspArgs),
     /// Generate a security report
     Report(commands::report::ReportArgs),
 }
@@ -32,6 +34,7 @@ fn main() {
     let result = match cli.command {
         Commands::Analyze(args) => commands::analyze::exec(args),
         Commands::Init(args) => commands::init::exec(args, None),
+        Commands::Lsp(args) => commands::lsp::exec(args),
         Commands::Report(args) => commands::report::exec(args),
     };
 
