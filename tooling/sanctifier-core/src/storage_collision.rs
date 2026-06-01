@@ -35,8 +35,6 @@ impl StorageVisitor {
         }
     }
 
-
-
     fn add_key(&mut self, value: String, key_type: String, location: String, line: usize) {
         let info = KeyInfo {
             value: value.clone(),

@@ -1,6 +1,6 @@
 use clap::Args;
-use serde_json::{json, Value};
 use sanctifier_core::{Analyzer, SanctifyConfig};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
 use std::sync::{Arc, Mutex};
@@ -73,16 +73,27 @@ impl SanctifierLanguageServer {
                 reader.read_exact(&mut message)?;
                 let message_str = String::from_utf8(message)?;
 
-                self.log(&format!("Received message: {}", message_str.chars().take(100).collect::<String>()));
+                self.log(&format!(
+                    "Received message: {}",
+                    message_str.chars().take(100).collect::<String>()
+                ));
 
                 match serde_json::from_str::<Value>(&message_str) {
                     Ok(msg) => {
                         if let Some(result) = self.handle_message(&msg) {
                             let response = result.to_string();
                             let response_bytes = response.as_bytes();
-                            write!(stdout, "Content-Length: {}\r\n\r\n{}", response_bytes.len(), response)?;
+                            write!(
+                                stdout,
+                                "Content-Length: {}\r\n\r\n{}",
+                                response_bytes.len(),
+                                response
+                            )?;
                             stdout.flush()?;
-                            self.log(&format!("Sent response: {}", response.chars().take(100).collect::<String>()));
+                            self.log(&format!(
+                                "Sent response: {}",
+                                response.chars().take(100).collect::<String>()
+                            ));
                         }
                     }
                     Err(e) => {
@@ -128,7 +139,10 @@ impl SanctifierLanguageServer {
             Some("textDocument/codeAction") => {
                 self.log("Handling codeAction request");
                 let params = msg.get("params")?;
-                let uri = params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str())?;
+                let uri = params
+                    .get("textDocument")
+                    .and_then(|t| t.get("uri"))
+                    .and_then(|u| u.as_str())?;
 
                 let docs = self.documents.lock().unwrap();
                 if let Some(text) = docs.get(uri) {
@@ -147,7 +161,10 @@ impl SanctifierLanguageServer {
                 }))
             }
             Some("initialized") | Some("exit") => {
-                self.log(&format!("Ignoring notification: {}", msg.get("method").and_then(|m| m.as_str()).unwrap_or("?")));
+                self.log(&format!(
+                    "Ignoring notification: {}",
+                    msg.get("method").and_then(|m| m.as_str()).unwrap_or("?")
+                ));
                 None
             }
             _ => {
@@ -157,18 +174,23 @@ impl SanctifierLanguageServer {
         }
     }
 
+    #[allow(dead_code)]
     fn handle_notification(&self, notif: &Value) -> anyhow::Result<Option<Vec<Value>>> {
         let method = notif.get("method").and_then(|m| m.as_str()).unwrap_or("");
         self.log(&format!("Handling notification: {}", method));
 
         match method {
             "textDocument/didOpen" => {
-                let params = notif.get("params").ok_or_else(|| anyhow::anyhow!("Missing params"))?;
-                let uri = params.get("textDocument")
+                let params = notif
+                    .get("params")
+                    .ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+                let uri = params
+                    .get("textDocument")
                     .and_then(|t| t.get("uri"))
                     .and_then(|u| u.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing uri"))?;
-                let text = params.get("textDocument")
+                let text = params
+                    .get("textDocument")
                     .and_then(|t| t.get("text"))
                     .and_then(|t| t.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing text"))?;
@@ -180,12 +202,16 @@ impl SanctifierLanguageServer {
                 Ok(Some(diagnostics))
             }
             "textDocument/didChange" => {
-                let params = notif.get("params").ok_or_else(|| anyhow::anyhow!("Missing params"))?;
-                let uri = params.get("textDocument")
+                let params = notif
+                    .get("params")
+                    .ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+                let uri = params
+                    .get("textDocument")
                     .and_then(|t| t.get("uri"))
                     .and_then(|u| u.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing uri"))?;
-                let text = params.get("contentChanges")
+                let text = params
+                    .get("contentChanges")
                     .and_then(|c| c.as_array())
                     .and_then(|a| a.first())
                     .and_then(|c| c.get("text"))
@@ -199,8 +225,11 @@ impl SanctifierLanguageServer {
                 Ok(Some(diagnostics))
             }
             "textDocument/didClose" => {
-                let params = notif.get("params").ok_or_else(|| anyhow::anyhow!("Missing params"))?;
-                let uri = params.get("textDocument")
+                let params = notif
+                    .get("params")
+                    .ok_or_else(|| anyhow::anyhow!("Missing params"))?;
+                let uri = params
+                    .get("textDocument")
                     .and_then(|t| t.get("uri"))
                     .and_then(|u| u.as_str())
                     .ok_or_else(|| anyhow::anyhow!("Missing uri"))?;
@@ -213,6 +242,7 @@ impl SanctifierLanguageServer {
         }
     }
 
+    #[allow(dead_code)]
     fn analyze_document(&self, text: &str) -> Vec<Value> {
         let config = SanctifyConfig::default();
         let analyzer = Analyzer::new(config);
@@ -377,6 +407,7 @@ impl SanctifierLanguageServer {
         actions
     }
 
+    #[allow(dead_code)]
     fn find_function_line(&self, fn_name: &str, text: &str) -> Option<usize> {
         let pattern = format!(r"pub\s+fn\s+{}\s*\(", fn_name);
         let re = regex::Regex::new(&pattern).ok()?;
@@ -388,6 +419,7 @@ impl SanctifierLanguageServer {
         None
     }
 
+    #[allow(dead_code)]
     fn find_struct_line(&self, struct_name: &str, text: &str) -> Option<usize> {
         let pattern = format!(r"(?:pub\s+)?struct\s+{}\s*(?:\{{|<)", struct_name);
         let re = regex::Regex::new(&pattern).ok()?;
@@ -415,7 +447,7 @@ mod tests {
                 }
             }
         "#;
-        
+
         let gaps = analyzer.scan_auth_gaps(source);
         assert_eq!(gaps.len(), 1);
         assert_eq!(gaps[0], "set_data");
@@ -432,7 +464,7 @@ mod tests {
                 }
             }
         "#;
-        
+
         let issues = analyzer.scan_arithmetic_overflow(source);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].operation, "+");
@@ -449,7 +481,7 @@ mod tests {
                 }
             }
         "#;
-        
+
         let issues = analyzer.scan_panics(source);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].issue_type, "panic!");
@@ -467,7 +499,7 @@ mod tests {
                 }
             }
         "#;
-        
+
         let patterns = analyzer.analyze_unsafe_patterns(source);
         assert!(!patterns.is_empty());
     }
@@ -485,7 +517,7 @@ mod tests {
                 pub buffer: Bytes,
             }
         "#;
-        
+
         let warnings = analyzer.analyze_ledger_size(source);
         assert_eq!(warnings.len(), 1);
     }
@@ -512,10 +544,10 @@ mod tests {
                 }
             }
         "#;
-        
+
         let gaps = analyzer.scan_auth_gaps(source);
         assert_eq!(gaps.len(), 2);
-        
+
         let arithmetic = analyzer.scan_arithmetic_overflow(source);
         assert!(arithmetic.len() >= 2);
     }
@@ -534,13 +566,11 @@ mod tests {
                 }
             }
         "#;
-        
+
         let gaps = analyzer.scan_auth_gaps(source);
         assert_eq!(gaps.len(), 0);
-        
+
         let arithmetic = analyzer.scan_arithmetic_overflow(source);
         assert_eq!(arithmetic.len(), 0);
     }
 }
-
-
