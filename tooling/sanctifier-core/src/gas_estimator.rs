@@ -62,7 +62,6 @@ impl GasEstimator {
         reports
     }
 }
-
 struct GasEstimationVisitor {
     function_name: String,
     instruction_count: usize,
