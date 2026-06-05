@@ -1,4 +1,5 @@
 //! Reentrancy analysis for Soroban contracts.
+#![allow(clippy::items_after_test_module)]
 use crate::rules::{Patch, Rule, RuleViolation, Severity};
 use syn::spanned::Spanned;
 use syn::{parse_str, File, Item};

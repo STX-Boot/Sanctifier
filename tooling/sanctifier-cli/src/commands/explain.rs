@@ -99,7 +99,7 @@ fn lookup_code<'a>(code_str: &str, codes: &'a [FindingCode]) -> Option<&'a Findi
         })
         .collect();
 
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|k| std::cmp::Reverse(k.1));
     scored.into_iter().next().map(|(c, _)| c)
 }
 
@@ -129,7 +129,7 @@ fn fuzzy_find_similar<'a>(code_str: &str, codes: &'a [FindingCode]) -> Vec<&'a F
         })
         .collect();
 
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|k| std::cmp::Reverse(k.1));
     scored.into_iter().take(5).map(|(c, _)| c).collect()
 }
 

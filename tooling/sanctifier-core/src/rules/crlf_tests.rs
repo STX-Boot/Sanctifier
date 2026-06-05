@@ -4,6 +4,7 @@
 //! Every rule must produce identical results whether the input uses LF or CRLF.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod crlf_tests {
     use crate::rules::{
         instance_storage_misuse::InstanceStorageMisuseRule, panic_detection::PanicDetectionRule,
