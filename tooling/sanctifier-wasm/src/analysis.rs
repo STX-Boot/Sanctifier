@@ -39,7 +39,7 @@ fn run_analysis(analyzer: &Analyzer, source: &str) -> AnalysisResult {
     let mut findings: Vec<Finding> = Vec::new();
 
     for g in &auth_gaps {
-        findings.push(converters::auth_gap(g));
+        findings.push(converters::auth_gap(g.as_str()));
     }
     for p in &panic_issues {
         findings.push(converters::panic_issue(p));

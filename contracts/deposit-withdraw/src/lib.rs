@@ -21,10 +21,7 @@
 //! | `balance`          | no            | Read caller's stored balance           |
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype,
-    token, Address, Env,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env};
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -41,7 +38,7 @@ enum DataKey {
 #[repr(u32)]
 pub enum Error {
     InsufficientBalance = 1,
-    ZeroAmount          = 2,
+    ZeroAmount = 2,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -65,8 +62,11 @@ impl DepositWithdraw {
         caller.require_auth();
 
         // Pull tokens from caller into this contract
-        token::Client::new(&env, &token)
-            .transfer(&caller, &env.current_contract_address(), &amount);
+        token::Client::new(&env, &token).transfer(
+            &caller,
+            &env.current_contract_address(),
+            &amount,
+        );
 
         // Credit balance
         let key = DataKey::Balance(caller.clone());
@@ -107,8 +107,11 @@ impl DepositWithdraw {
         env.storage().persistent().set(&key, &(bal - amount));
 
         // Send tokens to `recipient` (caller-controlled, no auth check) — NOT to `account`
-        token::Client::new(&env, &token)
-            .transfer(&env.current_contract_address(), &recipient, &amount);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &amount,
+        );
 
         Ok(())
     }
@@ -136,8 +139,11 @@ impl DepositWithdraw {
 
         env.storage().persistent().set(&key, &(bal - amount));
 
-        token::Client::new(&env, &token)
-            .transfer(&env.current_contract_address(), &account, &amount);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &account,
+            &amount,
+        );
 
         Ok(())
     }
@@ -168,10 +174,12 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let admin       = Address::generate(&env);
-        let token_addr  = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let admin = Address::generate(&env);
+        let token_addr = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let contract_id = env.register(DepositWithdraw, ());
-        let user        = Address::generate(&env);
+        let user = Address::generate(&env);
 
         StellarAssetClient::new(&env, &token_addr).mint(&user, &10_000i128);
 

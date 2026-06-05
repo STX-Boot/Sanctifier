@@ -313,7 +313,9 @@ impl MultisigWallet {
 
     pub fn set_recovery_guardian(env: Env, guardian: Address) {
         env.current_contract_address().require_auth();
-        env.storage().instance().set(&DataKey::RecoveryGuardian, &guardian);
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryGuardian, &guardian);
     }
 
     pub fn initiate_recovery(
@@ -325,8 +327,8 @@ impl MultisigWallet {
         guardian.require_auth();
         let stored_guardian: Option<Address> =
             env.storage().instance().get(&DataKey::RecoveryGuardian);
-        let stored_guardian = stored_guardian
-            .unwrap_or_else(|| env.panic_with_error(Error::NoRecoveryGuardian));
+        let stored_guardian =
+            stored_guardian.unwrap_or_else(|| env.panic_with_error(Error::NoRecoveryGuardian));
         if guardian != stored_guardian {
             env.panic_with_error(Error::Unauthorized);
         }
@@ -337,8 +339,14 @@ impl MultisigWallet {
             env.panic_with_error(Error::InvalidThreshold);
         }
         let unlock_at = env.ledger().timestamp() + 7 * 24 * 60 * 60;
-        let req = RecoveryRequest { new_signers, new_threshold, unlock_at };
-        env.storage().instance().set(&DataKey::RecoveryRequest, &req);
+        let req = RecoveryRequest {
+            new_signers,
+            new_threshold,
+            unlock_at,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequest, &req);
     }
 
     pub fn execute_recovery(env: Env) {
@@ -350,8 +358,12 @@ impl MultisigWallet {
         if env.ledger().timestamp() < req.unlock_at {
             env.panic_with_error(Error::TimelockActive);
         }
-        env.storage().instance().set(&DataKey::Signers, &req.new_signers);
-        env.storage().instance().set(&DataKey::Threshold, &req.new_threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey::Signers, &req.new_signers);
+        env.storage()
+            .instance()
+            .set(&DataKey::Threshold, &req.new_threshold);
         env.storage().instance().remove(&DataKey::RecoveryRequest);
     }
 
