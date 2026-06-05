@@ -58,6 +58,7 @@ jobs:
       - name: Publish to Chromatic
         id: chromatic
         uses: chromaui/action@latest
+        if: ${{ secrets.CHROMATIC_PROJECT_TOKEN != '' }}
         with:
           projectToken: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
           workingDir: frontend
@@ -68,7 +69,6 @@ jobs:
           onlyChanged: true
           traceChanged: expanded
           skip: 'dependabot/**'
-          diagnostics: false
           zip: true
 
       - name: Comment PR with Chromatic results
