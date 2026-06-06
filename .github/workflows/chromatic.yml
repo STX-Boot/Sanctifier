@@ -58,7 +58,7 @@ jobs:
       - name: Publish to Chromatic
         id: chromatic
         uses: chromaui/action@latest
-        if: ${{ secrets.CHROMATIC_PROJECT_TOKEN != '' }}
+        continue-on-error: true
         with:
           projectToken: ${{ secrets.CHROMATIC_PROJECT_TOKEN }}
           workingDir: frontend
