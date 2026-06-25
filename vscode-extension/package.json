@@ -53,6 +53,18 @@
           "default": true,
           "description": "If true, only activate in workspaces whose Cargo.toml references soroban-sdk.",
           "markdownDescription": "When enabled, diagnostics only appear in workspaces that contain a `Cargo.toml` referencing `soroban-sdk`. Disable to run in any Rust project."
+          "description": "If true, only activate in workspaces whose Cargo.toml references soroban-sdk."
+        },
+        "sanctifier.minSeverity": {
+          "type": "string",
+          "enum": ["error", "warning", "information"],
+          "enumDescriptions": [
+            "Show only errors.",
+            "Show warnings and errors (recommended).",
+            "Show all findings including informational hints."
+          ],
+          "default": "warning",
+          "description": "Minimum severity level to surface in the editor. Findings below this threshold are silently suppressed."
         }
       }
     },
@@ -60,6 +72,14 @@
       {
         "command": "sanctifier.analyzeWorkspace",
         "title": "Sanctifier: Analyze workspace with CLI (JSON)"
+      },
+      {
+        "command": "sanctifier.toggleEnable",
+        "title": "Sanctifier: Toggle enable/disable"
+      },
+      {
+        "command": "sanctifier.showOutput",
+        "title": "Sanctifier: Show output channel"
       }
     ]
   },
@@ -68,6 +88,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "vitest run",
+    "test": "node --test out/analyzer.test.js",
+    "test": "npm run compile && node --test out/test/analyzer.test.js",
     "lint": "tsc --noEmit"
   },
   "devDependencies": {
