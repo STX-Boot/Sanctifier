@@ -1,4 +1,8 @@
 import * as vscode from 'vscode';
+import { analyzeSorobanSource, looksLikeSorobanSource, filterBySeverity, type Severity } from './analyzer';
+import { type EditorFinding, type SanctifierExtensionApi } from './types';
+import { folderLooksLikeSorobanProject, invalidateWorkspaceCache } from './workspace';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import { analyzeSorobanSource, looksLikeSorobanSource, type EditorFinding } from './analyzer';
 import { findingsToSarif, parseSarif, serialiseSarif, validateSarifShape, sarifToFindings } from './sarif';
@@ -122,6 +126,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<Sancti
       return;
     }
 
+    const key = doc.uri.toString();
+    if (contentCache.get(key) === text) {
+      return;
+    }
+    contentCache.set(key, text);
+
+    const minSeverity = (cfg.get<string>('minSeverity') ?? 'warning') as Severity;
+    const allFindings = analyzeSorobanSource(text);
+    const findings = filterBySeverity(allFindings, minSeverity);
+
+    findingsCache.set(doc.uri.toString(), findings);
+    const diags = findings.map((f) => findingToDiagnostic(doc, f));
+    collection.set(doc.uri, diags);
     const key = doc.uri.toString();
     if (contentCache.get(key) === text) {
       return;
@@ -269,6 +286,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<Sancti
         return;
       }
 
+      // Remote workspaces (SSH, Codespaces, WSL) use non-file URIs; the CLI
+      // must run on the same machine as the source files.
+      if (folder.uri.scheme !== 'file') {
+        vscode.window.showErrorMessage(
+          'Sanctifier workspace analysis requires a local folder. ' +
+          'Remote workspaces (SSH / Codespaces / WSL) are not yet supported — ' +
+          'install the CLI on the remote host and run it from the integrated terminal.'
+        );
+        return;
+      }
+
+      if (!existsSync(exe)) {
+        vscode.window.showErrorMessage(
+          `sanctifier CLI not found at "${exe}". ` +
+          'Check the sanctifier.sanctifierPath setting and ensure the binary is installed.'
+        );
+        return;
+      }
+
+      outputChannel.clear();
+      outputChannel.show(true);
+      outputChannel.appendLine(`[sanctifier] Scanning ${folder.uri.fsPath} …`);
+
+      const minSeverity = (getConfig().get<string>('minSeverity') ?? 'warning') as Severity;
+
+      const output = await new Promise<string | undefined>((resolve) => {
+        const p = spawn(
+          exe,
+          ['analyze', folder.uri.fsPath, '--format', 'json', '--min-severity', minSeverity],
+          { cwd: folder.uri.fsPath }
+        );
       // Security (#612): warn before executing binaries outside the workspace.
       const insideWorkspace = exe.startsWith(folder.uri.fsPath);
       if (!insideWorkspace) {
@@ -288,11 +336,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<Sancti
         });
         let out = '';
         let err = '';
-        p.stdout.on('data', (b) => (out += b.toString()));
-        p.stderr.on('data', (b) => (err += b.toString()));
-        p.on('close', () => resolve(out || undefined));
-        p.on('error', () => resolve(undefined));
+        p.stdout.on('data', (b: Buffer) => (out += b.toString()));
+        p.stderr.on('data', (b: Buffer) => (err += b.toString()));
+        p.on('close', (code) => {
+          if (err) {
+            outputChannel.appendLine(`[sanctifier][stderr] ${err.trim()}`);
+          }
+          if (code !== 0 && !out) {
+            outputChannel.appendLine(`[sanctifier] CLI exited with code ${code}.`);
+            resolve(undefined);
+          } else {
+            resolve(out || undefined);
+          }
+        });
+        p.on('error', (e) => {
+          outputChannel.appendLine(`[sanctifier][error] ${e.message}`);
+          resolve(undefined);
+        });
       });
+
+      if (!output) {
+        vscode.window.showErrorMessage(
+          'sanctifier CLI produced no output. Check sanctifierPath and the output channel.'
+        );
+        return;
+      }
       if (!token) {
         vscode.window.showErrorMessage('sanctifier CLI failed or produced no output. Check sanctifierPath.');
       statusBar.text = '$(sync~spin) Sanctifier: running full scan…';

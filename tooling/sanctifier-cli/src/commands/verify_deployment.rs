@@ -110,6 +110,7 @@ pub fn exec(args: VerifyDeploymentArgs) -> anyhow::Result<()> {
     }
 }
 
+fn build_and_hash(source: &std::path::Path) -> anyhow::Result<String> {
 /// Build the contract in release mode and return its SHA-256 hex digest.
 fn build_and_hash(source: &std::path::Path) -> anyhow::Result<String> {
     // Try `stellar contract build` first (Stellar CLI ≥ 0.9), fall back to cargo directly
@@ -174,12 +175,24 @@ fn fetch_remote_hash(contract_id: &str, network: &str) -> anyhow::Result<String>
 
     for cli in &["stellar", "soroban"] {
         let status = Command::new(cli)
+            .args([
+                "contract",
+                "fetch",
+                "--id",
+                contract_id,
+                "--network",
+                network,
+                "--output-file",
+            ])
             .args(["contract", "fetch", "--id", contract_id, "--network", network, "--output-file"])
             .arg(&out_path)
             .status();
 
         if let Ok(s) = status {
             if s.success() {
+                let bytes = std::fs::read(&out_path).with_context(|| {
+                    format!("failed to read fetched WASM: {}", out_path.display())
+                })?;
                 let bytes = std::fs::read(&out_path)
                     .with_context(|| format!("failed to read fetched WASM: {}", out_path.display()))?;
                 let _ = std::fs::remove_file(&out_path);
@@ -212,6 +225,14 @@ fn sha256_hex(data: &[u8]) -> String {
     ];
 
     let mut h: [W<u32>; 8] = [
+        W(0x6a09e667),
+        W(0xbb67ae85),
+        W(0x3c6ef372),
+        W(0xa54ff53a),
+        W(0x510e527f),
+        W(0x9b05688c),
+        W(0x1f83d9ab),
+        W(0x5be0cd19),
         W(0x6a09e667), W(0xbb67ae85), W(0x3c6ef372), W(0xa54ff53a),
         W(0x510e527f), W(0x9b05688c), W(0x1f83d9ab), W(0x5be0cd19),
     ];
@@ -230,6 +251,11 @@ fn sha256_hex(data: &[u8]) -> String {
             w[i] = W(u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap()));
         }
         for i in 16..64 {
+            let s0 = w[i - 15].0.rotate_right(7)
+                ^ w[i - 15].0.rotate_right(18)
+                ^ (w[i - 15].0 >> 3);
+            let s1 =
+                w[i - 2].0.rotate_right(17) ^ w[i - 2].0.rotate_right(19) ^ (w[i - 2].0 >> 10);
             let s0 = w[i - 15].0.rotate_right(7) ^ w[i - 15].0.rotate_right(18) ^ (w[i - 15].0 >> 3);
             let s1 = w[i - 2].0.rotate_right(17) ^ w[i - 2].0.rotate_right(19) ^ (w[i - 2].0 >> 10);
             w[i] = w[i - 16] + W(s0) + w[i - 7] + W(s1);
@@ -243,6 +269,23 @@ fn sha256_hex(data: &[u8]) -> String {
             let s0 = a.0.rotate_right(2) ^ a.0.rotate_right(13) ^ a.0.rotate_right(22);
             let maj = (a.0 & b.0) ^ (a.0 & c.0) ^ (b.0 & c.0);
             let temp2 = W(s0) + W(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
+        }
+        h[0] += a;
+        h[1] += b;
+        h[2] += c;
+        h[3] += d;
+        h[4] += e;
+        h[5] += f;
+        h[6] += g;
+        h[7] += hh;
             hh = g; g = f; f = e;
             e = d + temp1;
             d = c; c = b; b = a;
