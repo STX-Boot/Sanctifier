@@ -147,6 +147,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.window.showErrorMessage('Open a folder to analyze.');
         return;
       }
+
+      // Security (#612): warn before executing binaries outside the workspace.
+      const insideWorkspace = exe.startsWith(folder.uri.fsPath);
+      if (!insideWorkspace) {
+        const choice = await vscode.window.showWarningMessage(
+          `Sanctifier: Run a binary outside the current workspace?\n\n${exe}`,
+          { modal: true },
+          'Run once'
+        );
+        if (choice !== 'Run once') {
+          return;
+        }
+      }
+
       const token = await new Promise<string | undefined>((resolve) => {
         const p = spawn(exe, ['analyze', folder.uri.fsPath, '--format', 'json'], {
           cwd: folder.uri.fsPath,
